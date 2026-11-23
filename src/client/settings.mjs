@@ -60,6 +60,53 @@ function formatBytes(bytes) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+function detectImageBlobTone(blob) {
+  return new Promise((resolve) => {
+    try {
+      const url = URL.createObjectURL(blob);
+      const img = new Image();
+      let done = false;
+      const finish = (tone) => {
+        if (done) return;
+        done = true;
+        URL.revokeObjectURL(url);
+        resolve(tone);
+      };
+      const timer = setTimeout(() => finish(null), 3000);
+      img.onload = () => {
+        try {
+          const size = 32;
+          const canvas = document.createElement('canvas');
+          canvas.width = size;
+          canvas.height = size;
+          const ctx = canvas.getContext('2d', { willReadFrequently: true });
+          if (!ctx) { clearTimeout(timer); finish(null); return; }
+          ctx.drawImage(img, 0, 0, size, size);
+          const data = ctx.getImageData(0, 0, size, size).data;
+          let sum = 0;
+          let count = 0;
+          for (let i = 0; i < data.length; i += 4) {
+            const alpha = data[i + 3] / 255;
+            if (alpha < 0.1) continue;
+            sum += (0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]);
+            count += 1;
+          }
+          clearTimeout(timer);
+          if (count === 0) { finish(null); return; }
+          finish((sum / count) > 168 ? 'light' : 'dark');
+        } catch {
+          clearTimeout(timer);
+          finish(null);
+        }
+      };
+      img.onerror = () => { clearTimeout(timer); finish(null); };
+      img.src = url;
+    } catch {
+      resolve(null);
+    }
+  });
+}
+
 function captureVideoPosterBlob(file) {
   return new Promise((resolve) => {
     try {
@@ -295,10 +342,14 @@ export function createSettingsController(store) {
     errorMsg = null;
     render();
     try {
+      const detectedImageTone = file.type?.startsWith('image/')
+        ? await detectImageBlobTone(file)
+        : null;
       const res = await hostRef.rpcRaw('POST', '/wallpapers/upload', {
         headers: {
           'Content-Type': file.type || 'application/octet-stream',
           'X-File-Name': encodeURIComponent(file.name || 'wallpaper'),
+          ...(detectedImageTone ? { 'X-Media-Tone': detectedImageTone } : {}),
         },
         body: file,
       });
@@ -310,8 +361,12 @@ export function createSettingsController(store) {
       if (uploadedItem?.kind === 'video') {
         const posterBlob = await captureVideoPosterBlob(file);
         if (posterBlob) {
+          const posterTone = await detectImageBlobTone(posterBlob);
           const posterRes = await hostRef.rpcRaw('POST', `/wallpapers/upload?posterOf=${encodeURIComponent(uploadedItem.id)}`, {
-            headers: { 'Content-Type': posterBlob.type || 'image/jpeg' },
+            headers: {
+              'Content-Type': posterBlob.type || 'image/jpeg',
+              ...(posterTone ? { 'X-Media-Tone': posterTone } : {}),
+            },
             body: posterBlob,
           });
           if (posterRes.ok) {
@@ -681,12 +736,48 @@ export function createSettingsController(store) {
     if (slot) {
       const fxSec = document.createElement('section');
       fxSec.className = 'cwwp-sec';
+      const fxHead = document.createElement('div');
+      fxHead.className = 'cwwp-sec-head';
       const fxTitle = document.createElement('h3');
       fxTitle.className = 'cwwp-sec-title';
       fxTitle.textContent = t('effectsTitle');
+      const resetFxBtn = document.createElement('button');
+      resetFxBtn.type = 'button';
+      resetFxBtn.className = 'cwwp-btn';
+      resetFxBtn.style.padding = '3px 8px';
+      resetFxBtn.style.fontSize = '11px';
+      resetFxBtn.textContent = t('resetEffects');
+      resetFxBtn.onclick = () => updateDraft((d) => {
+        const target = getActiveSlot(d);
+        if (!target) return;
+        target.blurPx = 0;
+        target.scrimOpacity = 0.22;
+        target.scrimMode = 'auto';
+        target.glassTone = 'auto';
+        target.surfaceOpacity = 0.36;
+        target.glassBlurPx = 20;
+        target.fit = 'cover';
+        target.positionX = 50;
+        target.positionY = 50;
+      });
+      fxHead.append(fxTitle, resetFxBtn);
 
       const sliders = document.createElement('div');
       sliders.className = 'cwwp-sliders';
+
+      const glassToneLabel = document.createElement('span');
+      glassToneLabel.textContent = t('glassTone');
+      const glassToneSeg = document.createElement('div');
+      glassToneSeg.className = 'cwwp-seg';
+      for (const [val, labelKey] of [['auto', 'glassToneAuto'], ['dark', 'glassToneDark'], ['light', 'glassToneLight']]) {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.setAttribute('aria-pressed', String((slot.glassTone || 'auto') === val));
+        b.textContent = t(labelKey);
+        b.onclick = () => updateDraft((d) => { const s = getActiveSlot(d); if (s) s.glassTone = val; });
+        glassToneSeg.appendChild(b);
+      }
+      sliders.append(glassToneLabel, glassToneSeg);
 
       if (slot.mediaType === 'image' || slot.mediaType === 'video') {
         const fitLabel = document.createElement('span');
@@ -776,8 +867,8 @@ export function createSettingsController(store) {
       sliders.appendChild(buildSlider({
         label: t('surfaceOpacity'),
         value: Math.round(slot.surfaceOpacity * 100),
-        min: 35,
-        max: 98,
+        min: 8,
+        max: 90,
         step: 1,
         display: `${Math.round(slot.surfaceOpacity * 100)}%`,
         onChange: (v) => {
@@ -817,7 +908,7 @@ export function createSettingsController(store) {
         }));
       }
 
-      fxSec.append(fxTitle, sliders);
+      fxSec.append(fxHead, sliders);
       scroll.appendChild(fxSec);
     }
 

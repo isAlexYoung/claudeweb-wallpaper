@@ -1,4 +1,5 @@
 {
+  "$schema": "https://raw.githubusercontent.com/isAlexYoung/ClaudeWeb/main/doc/plugin-sdk/manifest.schema.json",
   "manifestVersion": 2,
   "minPluginApi": 2,
   "requiredCapabilities": [
@@ -11,7 +12,7 @@
   ],
   "name": "claudeweb-wallpaper",
   "displayName": "Wallpaper",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Custom static, animated/video, per-theme, and login-screen wallpapers with live workspace glassmorphism.",
   "author": "isAlexYoung",
   "icon": "icon.svg",
@@ -32,8 +33,8 @@
   "build": {
     "mode": "prebuilt",
     "integrity": {
-      "dist/index.js": "sha256-87d68b316dbf947d2718bfa0bfcacb895473319f496598f205cdc79b7c210764",
-      "dist/server.cjs": "sha256-a3d4a251913cb112149de6c7c5a546931ae090acf0476bf9c9a973149a9977bd"
+      "dist/index.js": "sha256-fba007bc5a5076a0edbc164fb8eb68b461d91137aac8704c7a1816a9b9dc1d87",
+      "dist/server.cjs": "sha256-36c12c5aed14f0b3963b62f794367189efa8bb4c26f43237427571c8a279a198"
     }
   },
   "permissions": [

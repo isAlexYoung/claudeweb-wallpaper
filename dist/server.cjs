@@ -10,6 +10,7 @@ const __modules = {
       "nameEn": "Warm Sand",
       "nameZh": "暖沙纸韵",
       "recommendedTheme": "warm",
+      "tone": "light",
       "cssGradient": "radial-gradient(circle at 18% 18%, #f6e7cf 0%, transparent 55%), radial-gradient(circle at 82% 80%, #e7d5bc 0%, transparent 58%), linear-gradient(135deg, #fbf7ee 0%, #f1e7d5 52%, #e8dcc7 100%)"
     },
     {
@@ -17,6 +18,7 @@ const __modules = {
       "nameEn": "Apricot Dusk",
       "nameZh": "杏色微光",
       "recommendedTheme": "warm",
+      "tone": "light",
       "cssGradient": "radial-gradient(circle at 80% 15%, #f4c8a6 0%, transparent 48%), radial-gradient(circle at 15% 85%, #e5d8c8 0%, transparent 54%), linear-gradient(145deg, #fcf4ea 0%, #f5e2d0 55%, #ead6c3 100%)"
     },
     {
@@ -24,6 +26,7 @@ const __modules = {
       "nameEn": "Morning Mist",
       "nameZh": "晨雾浅蓝",
       "recommendedTheme": "light",
+      "tone": "light",
       "cssGradient": "radial-gradient(circle at 20% 20%, #dbeafe 0%, transparent 50%), radial-gradient(circle at 85% 75%, #e0e7ff 0%, transparent 52%), linear-gradient(135deg, #f8fafc 0%, #eff6ff 55%, #f1f5f9 100%)"
     },
     {
@@ -31,6 +34,7 @@ const __modules = {
       "nameEn": "Soft Sage",
       "nameZh": "淡青苔雾",
       "recommendedTheme": "light",
+      "tone": "light",
       "cssGradient": "radial-gradient(circle at 75% 20%, #d1fae5 0%, transparent 50%), radial-gradient(circle at 20% 80%, #e0f2fe 0%, transparent 55%), linear-gradient(135deg, #f7faf8 0%, #ecfdf5 50%, #f0f9ff 100%)"
     },
     {
@@ -38,28 +42,32 @@ const __modules = {
       "nameEn": "Northern Aurora",
       "nameZh": "极夜极光",
       "recommendedTheme": "dark",
-      "cssGradient": "radial-gradient(circle at 22% 20%, rgba(56, 189, 248, 0.28) 0%, transparent 48%), radial-gradient(circle at 78% 72%, rgba(99, 102, 241, 0.26) 0%, transparent 52%), linear-gradient(145deg, #0b1120 0%, #111827 52%, #171c26 100%)"
+      "tone": "dark",
+      "cssGradient": "radial-gradient(circle at 22% 20%, rgba(56, 189, 248, 0.34) 0%, transparent 48%), radial-gradient(circle at 78% 72%, rgba(99, 102, 241, 0.32) 0%, transparent 52%), linear-gradient(145deg, #090f1d 0%, #101726 52%, #151b28 100%)"
     },
     {
       "id": "dark-ember",
       "nameEn": "Obsidian Ember",
       "nameZh": "曜石余烬",
       "recommendedTheme": "dark",
-      "cssGradient": "radial-gradient(circle at 82% 22%, rgba(234, 88, 12, 0.24) 0%, transparent 46%), radial-gradient(circle at 18% 82%, rgba(168, 85, 247, 0.18) 0%, transparent 52%), linear-gradient(140deg, #121316 0%, #1c1917 55%, #16171a 100%)"
+      "tone": "dark",
+      "cssGradient": "radial-gradient(circle at 76% 24%, rgba(220, 38, 38, 0.30) 0%, transparent 46%), radial-gradient(circle at 20% 80%, rgba(234, 88, 12, 0.22) 0%, transparent 50%), linear-gradient(140deg, #0f1014 0%, #1a1416 54%, #12141a 100%)"
     },
     {
       "id": "dark-forest",
       "nameEn": "Midnight Pine",
       "nameZh": "松林深夜",
       "recommendedTheme": "dark",
-      "cssGradient": "radial-gradient(circle at 25% 25%, rgba(16, 185, 129, 0.22) 0%, transparent 50%), radial-gradient(circle at 75% 80%, rgba(20, 184, 166, 0.18) 0%, transparent 52%), linear-gradient(150deg, #0d1512 0%, #131c18 55%, #181c1a 100%)"
+      "tone": "dark",
+      "cssGradient": "radial-gradient(circle at 25% 25%, rgba(16, 185, 129, 0.28) 0%, transparent 50%), radial-gradient(circle at 75% 80%, rgba(20, 184, 166, 0.24) 0%, transparent 52%), linear-gradient(150deg, #0b1411 0%, #111c18 55%, #151a19 100%)"
     },
     {
       "id": "studio-lavender",
       "nameEn": "Velvet Twilight",
       "nameZh": "暮紫绒影",
       "recommendedTheme": "dark",
-      "cssGradient": "radial-gradient(circle at 72% 25%, rgba(192, 132, 252, 0.24) 0%, transparent 50%), radial-gradient(circle at 20% 75%, rgba(244, 114, 182, 0.16) 0%, transparent 52%), linear-gradient(135deg, #161320 0%, #1e182b 50%, #151722 100%)"
+      "tone": "dark",
+      "cssGradient": "radial-gradient(circle at 72% 25%, rgba(192, 132, 252, 0.30) 0%, transparent 50%), radial-gradient(circle at 20% 75%, rgba(244, 114, 182, 0.22) 0%, transparent 52%), linear-gradient(135deg, #13101d 0%, #1c162b 50%, #131622 100%)"
     }
   ],
   "wallpaperEngine": {
@@ -86,12 +94,14 @@ const os = require('node:os');
 const path = require('node:path');
 
 const SCHEMA_VERSION = 1;
+const GLASS_ENGINE_VERSION = 2;
 const MAX_UPLOAD_BYTES = 50 * 1024 * 1024; // 50 MiB
 const MAX_ITEMS = 64;
 const THEME_KEYS = ['warm', 'light', 'dark'];
 const VALID_SCOPES = new Set(['none', 'chat', 'workspace']);
 const VALID_FITS = new Set(['cover', 'contain', 'center']);
 const VALID_SCRIM_MODES = new Set(['auto', 'light', 'dark']);
+const VALID_GLASS_TONES = new Set(['auto', 'light', 'dark']);
 const VALID_MEDIA_TYPES = new Set(['none', 'preset', 'image', 'video']);
 const ITEM_ID_PATTERN = /^[a-f0-9]{16,40}$/;
 
@@ -146,23 +156,25 @@ function defaultSlot(presetId) {
     positionX: 50,
     positionY: 50,
     blurPx: 0,
-    scrimOpacity: 0.16,
+    scrimOpacity: 0.22,
     scrimMode: 'auto',
-    surfaceOpacity: 0.84,
-    glassBlurPx: 16,
+    glassTone: 'auto',
+    surfaceOpacity: 0.36,
+    glassBlurPx: 20,
     videoPlaybackRate: 1,
-    loginCardOpacity: 0.9,
+    loginCardOpacity: 0.88,
   };
 }
 
 function defaultConfig() {
   return {
     schema: SCHEMA_VERSION,
+    glassEngine: GLASS_ENGINE_VERSION,
     revision: 1,
     updatedAt: new Date().toISOString(),
     scope: 'workspace',
     perTheme: true,
-    shared: defaultSlot('warm-sand'),
+    shared: defaultSlot('dark-aurora'),
     themes: {
       warm: defaultSlot('warm-sand'),
       light: defaultSlot('light-mist'),
@@ -187,7 +199,7 @@ function atomicWriteJson(filePath, data) {
   }
 }
 
-function sanitizeSlot(raw, fallback, presetIds, validItemIds) {
+function sanitizeSlot(raw, fallback, presetIds, validItemIds, migrateV1Glass = false) {
   const src = raw && typeof raw === 'object' ? raw : {};
   let mediaType = VALID_MEDIA_TYPES.has(src.mediaType) ? src.mediaType : fallback.mediaType;
   let presetId = typeof src.presetId === 'string' && presetIds.has(src.presetId) ? src.presetId : null;
@@ -202,6 +214,15 @@ function sanitizeSlot(raw, fallback, presetIds, validItemIds) {
     presetId = fallback.presetId || null;
   }
 
+  // Smoothly upgrade v1.0.0 untouched opaque glass defaults (0.84 / 16px) to DSH-style translucent glass (0.36 / 20px)
+  // while preserving any user-customized opacity below 0.80.
+  let rawSurfaceOpacity = src.surfaceOpacity;
+  let rawGlassBlurPx = src.glassBlurPx;
+  if (migrateV1Glass && !src.glassTone && typeof rawSurfaceOpacity === 'number' && rawSurfaceOpacity >= 0.8) {
+    rawSurfaceOpacity = fallback.surfaceOpacity;
+    if (rawGlassBlurPx === 16) rawGlassBlurPx = fallback.glassBlurPx;
+  }
+
   return {
     mediaType,
     presetId: mediaType === 'preset' ? presetId : null,
@@ -212,8 +233,9 @@ function sanitizeSlot(raw, fallback, presetIds, validItemIds) {
     blurPx: Math.round(clampNumber(src.blurPx, fallback.blurPx, 0, 32)),
     scrimOpacity: Number(clampNumber(src.scrimOpacity, fallback.scrimOpacity, 0, 0.85).toFixed(2)),
     scrimMode: VALID_SCRIM_MODES.has(src.scrimMode) ? src.scrimMode : fallback.scrimMode,
-    surfaceOpacity: Number(clampNumber(src.surfaceOpacity, fallback.surfaceOpacity, 0.35, 0.98).toFixed(2)),
-    glassBlurPx: Math.round(clampNumber(src.glassBlurPx, fallback.glassBlurPx, 0, 32)),
+    glassTone: VALID_GLASS_TONES.has(src.glassTone) ? src.glassTone : fallback.glassTone,
+    surfaceOpacity: Number(clampNumber(rawSurfaceOpacity, fallback.surfaceOpacity, 0.08, 0.90).toFixed(2)),
+    glassBlurPx: Math.round(clampNumber(rawGlassBlurPx, fallback.glassBlurPx, 0, 32)),
     videoPlaybackRate: Number(clampNumber(src.videoPlaybackRate, fallback.videoPlaybackRate, 0.25, 2).toFixed(2)),
     loginCardOpacity: Number(clampNumber(src.loginCardOpacity, fallback.loginCardOpacity, 0.55, 1).toFixed(2)),
   };
@@ -251,23 +273,24 @@ function createWallpaperStorage(options) {
     atomicWriteJson(catalogPath, items);
   }
 
-  function sanitizeConfig(raw, items, nextRevision) {
+  function sanitizeConfig(raw, items, nextRevision, migrateV1Glass = false) {
     const base = defaultConfig();
     const validItemIds = new Set(items.map((i) => i.id));
     const src = raw && typeof raw === 'object' ? raw : {};
 
     const themes = {};
     for (const key of THEME_KEYS) {
-      themes[key] = sanitizeSlot(src.themes?.[key], base.themes[key], presetIds, validItemIds);
+      themes[key] = sanitizeSlot(src.themes?.[key], base.themes[key], presetIds, validItemIds, migrateV1Glass);
     }
 
     return {
       schema: SCHEMA_VERSION,
+      glassEngine: GLASS_ENGINE_VERSION,
       revision: nextRevision,
       updatedAt: new Date().toISOString(),
       scope: VALID_SCOPES.has(src.scope) ? src.scope : base.scope,
       perTheme: typeof src.perTheme === 'boolean' ? src.perTheme : base.perTheme,
-      shared: sanitizeSlot(src.shared, base.shared, presetIds, validItemIds),
+      shared: sanitizeSlot(src.shared, base.shared, presetIds, validItemIds, migrateV1Glass),
       themes,
       login: {
         enabled: Boolean(src.login?.enabled),
@@ -292,8 +315,21 @@ function createWallpaperStorage(options) {
           fs.copyFileSync(configPath, backupPath);
         }
       }
+      const needsV1GlassMigration = Boolean(
+        parsed
+        && typeof parsed === 'object'
+        && (!parsed.glassEngine || Number(parsed.glassEngine) < GLASS_ENGINE_VERSION),
+      );
       const rev = typeof parsed?.revision === 'number' && parsed.revision >= 1 ? Math.floor(parsed.revision) : 1;
-      return sanitizeConfig(parsed, items, rev);
+      const sanitized = sanitizeConfig(parsed, items, rev, needsV1GlassMigration);
+      if (needsV1GlassMigration) {
+        const backupPath = path.join(dataDir, 'config.v1-glass.bak.json');
+        if (!fs.existsSync(backupPath)) {
+          try { fs.copyFileSync(configPath, backupPath); } catch { /* ignore */ }
+        }
+        atomicWriteJson(configPath, sanitized);
+      }
+      return sanitized;
     } catch {
       // Corrupted JSON: preserve original for manual recovery and boot cleanly with defaults.
       try {
@@ -342,6 +378,7 @@ function createWallpaperStorage(options) {
 
     const items = readCatalog();
     const posterOf = typeof meta.posterOf === 'string' && ITEM_ID_PATTERN.test(meta.posterOf) ? meta.posterOf : null;
+    const detectedTone = meta.tone === 'light' || meta.tone === 'dark' ? meta.tone : null;
 
     if (posterOf) {
       if (!mimeType.startsWith('image/')) {
@@ -361,6 +398,7 @@ function createWallpaperStorage(options) {
       fs.writeFileSync(posterPath, buffer);
       parent.posterFileName = posterFileName;
       parent.posterMime = mimeType;
+      if (detectedTone) parent.tone = detectedTone;
       saveCatalog(items);
       return parent;
     }
@@ -374,6 +412,10 @@ function createWallpaperStorage(options) {
     const sha256 = crypto.createHash('sha256').update(buffer).digest('hex');
     const existing = items.find((item) => item.sha256 === sha256);
     if (existing) {
+      if (detectedTone && existing.tone !== detectedTone) {
+        existing.tone = detectedTone;
+        saveCatalog(items);
+      }
       return existing;
     }
 
@@ -402,6 +444,7 @@ function createWallpaperStorage(options) {
       fileName,
       posterFileName: null,
       posterMime: null,
+      tone: detectedTone,
       source: 'local',
       createdAt: new Date().toISOString(),
     };
@@ -772,7 +815,9 @@ function createWallpaperServer(options = {}) {
           try { originalName = decodeURIComponent(rawHeaderName); } catch { originalName = rawHeaderName; }
         }
         const posterOf = parsedUrl.searchParams.get('posterOf') || undefined;
-        const item = storage.storeUpload(buf, { originalName, posterOf });
+        const rawTone = typeof req.headers['x-media-tone'] === 'string' ? req.headers['x-media-tone'].trim().toLowerCase() : '';
+        const tone = rawTone === 'light' || rawTone === 'dark' ? rawTone : undefined;
+        const item = storage.storeUpload(buf, { originalName, posterOf, tone });
         ws.broadcast({ type: 'catalog_updated', itemId: item.id });
         sendJson(res, 201, { item, items: storage.readCatalog(), stats: storage.getStats() });
         return;

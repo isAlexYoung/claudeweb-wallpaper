@@ -6,6 +6,24 @@ function mapObjectFit(fit) {
   return 'cover';
 }
 
+function resolveGlassTone(slot, store, themeMode) {
+  if (slot.glassTone === 'dark' || slot.glassTone === 'light') {
+    return slot.glassTone;
+  }
+  if (slot.mediaType === 'preset') {
+    const preset = store.findPreset(slot.presetId);
+    if (preset?.tone === 'dark' || preset?.tone === 'light') return preset.tone;
+    return preset?.recommendedTheme === 'dark' ? 'dark' : 'light';
+  }
+  if (slot.mediaType === 'image' || slot.mediaType === 'video') {
+    const item = store.findItem(slot.itemId);
+    if (item?.tone === 'dark' || item?.tone === 'light') return item.tone;
+    // Vivid photos and videos default to DSH smoked dark glass for crisp white text contrast.
+    return 'dark';
+  }
+  return themeMode === 'dark' ? 'dark' : 'light';
+}
+
 export function createBackgroundController(store) {
   let rootContainer = null;
   let hostRef = null;
@@ -70,10 +88,12 @@ export function createBackgroundController(store) {
       return;
     }
 
+    const glassTone = resolveGlassTone(slot, store, themeMode);
     hostRef.surface?.setWallpaperVars({
       scope: config.scope,
-      surfaceOpacity: slot.surfaceOpacity ?? 0.84,
-      glassBlurPx: slot.glassBlurPx ?? 16,
+      surfaceOpacity: slot.surfaceOpacity ?? 0.36,
+      glassBlurPx: slot.glassBlurPx ?? 20,
+      tone: glassTone,
     });
 
     const blurPx = Math.max(0, Math.min(32, Number(slot.blurPx) || 0));
@@ -85,7 +105,7 @@ export function createBackgroundController(store) {
       ? true
       : slot.scrimMode === 'light'
         ? false
-        : themeMode === 'dark';
+        : glassTone === 'dark';
     const scrimOpacity = Math.max(0, Math.min(0.85, Number(slot.scrimOpacity) || 0));
     const scrimBg = scrimIsDark
       ? `rgba(10, 12, 16, ${scrimOpacity})`

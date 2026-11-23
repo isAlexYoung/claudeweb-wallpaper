@@ -171,7 +171,9 @@ function createWallpaperServer(options = {}) {
           try { originalName = decodeURIComponent(rawHeaderName); } catch { originalName = rawHeaderName; }
         }
         const posterOf = parsedUrl.searchParams.get('posterOf') || undefined;
-        const item = storage.storeUpload(buf, { originalName, posterOf });
+        const rawTone = typeof req.headers['x-media-tone'] === 'string' ? req.headers['x-media-tone'].trim().toLowerCase() : '';
+        const tone = rawTone === 'light' || rawTone === 'dark' ? rawTone : undefined;
+        const item = storage.storeUpload(buf, { originalName, posterOf, tone });
         ws.broadcast({ type: 'catalog_updated', itemId: item.id });
         sendJson(res, 201, { item, items: storage.readCatalog(), stats: storage.getStats() });
         return;

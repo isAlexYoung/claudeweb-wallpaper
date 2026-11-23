@@ -5,6 +5,7 @@
       "nameEn": "Warm Sand",
       "nameZh": "暖沙纸韵",
       "recommendedTheme": "warm",
+      "tone": "light",
       "cssGradient": "radial-gradient(circle at 18% 18%, #f6e7cf 0%, transparent 55%), radial-gradient(circle at 82% 80%, #e7d5bc 0%, transparent 58%), linear-gradient(135deg, #fbf7ee 0%, #f1e7d5 52%, #e8dcc7 100%)"
     },
     {
@@ -12,6 +13,7 @@
       "nameEn": "Apricot Dusk",
       "nameZh": "杏色微光",
       "recommendedTheme": "warm",
+      "tone": "light",
       "cssGradient": "radial-gradient(circle at 80% 15%, #f4c8a6 0%, transparent 48%), radial-gradient(circle at 15% 85%, #e5d8c8 0%, transparent 54%), linear-gradient(145deg, #fcf4ea 0%, #f5e2d0 55%, #ead6c3 100%)"
     },
     {
@@ -19,6 +21,7 @@
       "nameEn": "Morning Mist",
       "nameZh": "晨雾浅蓝",
       "recommendedTheme": "light",
+      "tone": "light",
       "cssGradient": "radial-gradient(circle at 20% 20%, #dbeafe 0%, transparent 50%), radial-gradient(circle at 85% 75%, #e0e7ff 0%, transparent 52%), linear-gradient(135deg, #f8fafc 0%, #eff6ff 55%, #f1f5f9 100%)"
     },
     {
@@ -26,6 +29,7 @@
       "nameEn": "Soft Sage",
       "nameZh": "淡青苔雾",
       "recommendedTheme": "light",
+      "tone": "light",
       "cssGradient": "radial-gradient(circle at 75% 20%, #d1fae5 0%, transparent 50%), radial-gradient(circle at 20% 80%, #e0f2fe 0%, transparent 55%), linear-gradient(135deg, #f7faf8 0%, #ecfdf5 50%, #f0f9ff 100%)"
     },
     {
@@ -33,28 +37,32 @@
       "nameEn": "Northern Aurora",
       "nameZh": "极夜极光",
       "recommendedTheme": "dark",
-      "cssGradient": "radial-gradient(circle at 22% 20%, rgba(56, 189, 248, 0.28) 0%, transparent 48%), radial-gradient(circle at 78% 72%, rgba(99, 102, 241, 0.26) 0%, transparent 52%), linear-gradient(145deg, #0b1120 0%, #111827 52%, #171c26 100%)"
+      "tone": "dark",
+      "cssGradient": "radial-gradient(circle at 22% 20%, rgba(56, 189, 248, 0.34) 0%, transparent 48%), radial-gradient(circle at 78% 72%, rgba(99, 102, 241, 0.32) 0%, transparent 52%), linear-gradient(145deg, #090f1d 0%, #101726 52%, #151b28 100%)"
     },
     {
       "id": "dark-ember",
       "nameEn": "Obsidian Ember",
       "nameZh": "曜石余烬",
       "recommendedTheme": "dark",
-      "cssGradient": "radial-gradient(circle at 82% 22%, rgba(234, 88, 12, 0.24) 0%, transparent 46%), radial-gradient(circle at 18% 82%, rgba(168, 85, 247, 0.18) 0%, transparent 52%), linear-gradient(140deg, #121316 0%, #1c1917 55%, #16171a 100%)"
+      "tone": "dark",
+      "cssGradient": "radial-gradient(circle at 76% 24%, rgba(220, 38, 38, 0.30) 0%, transparent 46%), radial-gradient(circle at 20% 80%, rgba(234, 88, 12, 0.22) 0%, transparent 50%), linear-gradient(140deg, #0f1014 0%, #1a1416 54%, #12141a 100%)"
     },
     {
       "id": "dark-forest",
       "nameEn": "Midnight Pine",
       "nameZh": "松林深夜",
       "recommendedTheme": "dark",
-      "cssGradient": "radial-gradient(circle at 25% 25%, rgba(16, 185, 129, 0.22) 0%, transparent 50%), radial-gradient(circle at 75% 80%, rgba(20, 184, 166, 0.18) 0%, transparent 52%), linear-gradient(150deg, #0d1512 0%, #131c18 55%, #181c1a 100%)"
+      "tone": "dark",
+      "cssGradient": "radial-gradient(circle at 25% 25%, rgba(16, 185, 129, 0.28) 0%, transparent 50%), radial-gradient(circle at 75% 80%, rgba(20, 184, 166, 0.24) 0%, transparent 52%), linear-gradient(150deg, #0b1411 0%, #111c18 55%, #151a19 100%)"
     },
     {
       "id": "studio-lavender",
       "nameEn": "Velvet Twilight",
       "nameZh": "暮紫绒影",
       "recommendedTheme": "dark",
-      "cssGradient": "radial-gradient(circle at 72% 25%, rgba(192, 132, 252, 0.24) 0%, transparent 50%), radial-gradient(circle at 20% 75%, rgba(244, 114, 182, 0.16) 0%, transparent 52%), linear-gradient(135deg, #161320 0%, #1e182b 50%, #151722 100%)"
+      "tone": "dark",
+      "cssGradient": "radial-gradient(circle at 72% 25%, rgba(192, 132, 252, 0.30) 0%, transparent 50%), radial-gradient(circle at 20% 75%, rgba(244, 114, 182, 0.22) 0%, transparent 52%), linear-gradient(135deg, #13101d 0%, #1c162b 50%, #131622 100%)"
     }
   ],
   "wallpaperEngine": {

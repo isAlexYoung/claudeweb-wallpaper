@@ -9,9 +9,10 @@ Static, animated/video, per-theme, and login-screen wallpaper plugin for **Claud
 - **Flexible Coverage / 覆盖范围可选**
   - **Off (关闭)** — restores ClaudeWeb's exact default theme.
   - **Chat Only (仅对话区)** — wallpapers behind the conversation area while keeping sidebars solid.
-  - **Full Workspace (全局工作区)** — theme-aware frosted glassmorphism (`backdrop-filter`) across the sidebar, header, inspector, and bubbles while keeping CodeMirror editors, xterm terminals, and approval dialogs crisp and opaque.
-- **Per-Theme Wallpapers / 暖白 · 浅色 · 深色独立绑定**
+  - **Full Workspace (全局工作区)** — full-bleed edge-to-edge wallpaper with seamless smoked dark / frosted light glassmorphism (`backdrop-filter`), floating transparent header, frosted composer capsule, and adaptive typography contrast (`tone: 'auto' | 'dark' | 'light'`) while keeping CodeMirror editors, xterm terminals, and approval dialogs crisp and solid.
+- **Per-Theme Wallpapers & Auto Luminance / 暖白 · 浅色 · 深色独立绑定与明暗自适应**
   - Bind different wallpapers and glass settings to `warm`, `light`, and `dark`, switching automatically with ClaudeWeb's theme.
+  - Uploaded photos and videos automatically sample image brightness so dark wallpapers get crisp white text + smoked dark glass even on Warm/Light themes, with one-click manual override (`Auto` / `Dark Glass` / `Light Glass`).
 - **Static, Animated & Video Wallpapers / 静态、动图与视频壁纸**
   - Built-in curated theme gradients + local uploads (`PNG`, `JPEG`, `WebP`, `AVIF`, `GIF`, `MP4`, `WebM`, up to 50 MB).
   - Streams via **Scoped Media Tickets** with full HTTP `Range` / `206` seeking, automatic background-tab pause (`visibilitychange`), automatic video poster capture, and `prefers-reduced-motion` static fallback.

@@ -6,7 +6,7 @@ const MESSAGES = {
     scopeNone: 'Off',
     scopeChat: 'Chat Only',
     scopeWorkspace: 'Full Workspace',
-    scopeHint: 'Full Workspace applies frosted glass translucency to the sidebar, header, and inspector while keeping editors and terminals opaque.',
+    scopeHint: 'Full Workspace renders the wallpaper edge-to-edge behind a frosted translucent sidebar, floating header, and composer while keeping editors and terminals solid.',
     themeBinding: 'Per-Theme Wallpapers',
     themeBindingHint: 'Bind separate wallpapers and glass effects for Warm, Light, and Dark themes.',
     themeWarm: 'Warm',
@@ -20,6 +20,11 @@ const MESSAGES = {
     noUploads: 'No uploaded wallpapers yet.',
     deleteItem: 'Delete',
     effectsTitle: 'Appearance & Glass Effects',
+    resetEffects: 'Reset Glass',
+    glassTone: 'Glass & Text Style',
+    glassToneAuto: 'Auto',
+    glassToneDark: 'Dark Glass',
+    glassToneLight: 'Light Glass',
     fit: 'Image / Video Fit',
     fitCover: 'Cover',
     fitContain: 'Contain',
@@ -67,7 +72,7 @@ const MESSAGES = {
     scopeNone: '关闭',
     scopeChat: '仅对话区',
     scopeWorkspace: '全局工作区',
-    scopeHint: '全局工作区会为侧边栏、顶栏和右侧面板启用毛玻璃透视效果，同时保持代码编辑器与终端完全不透明。',
+    scopeHint: '全局工作区会让壁纸铺满整窗，侧边栏、浮空顶栏与输入框自动呈现通透毛玻璃效果，同时保持代码编辑器与终端完全清晰不透明。',
     themeBinding: '按主题独立设置壁纸',
     themeBindingHint: '为暖白、浅色、深色三套主题分别绑定不同的壁纸与毛玻璃参数。',
     themeWarm: '暖白',
@@ -81,6 +86,11 @@ const MESSAGES = {
     noUploads: '尚未上传自定义壁纸。',
     deleteItem: '删除',
     effectsTitle: '显示与毛玻璃调节',
+    resetEffects: '恢复毛玻璃默认',
+    glassTone: '毛玻璃与文字风格',
+    glassToneAuto: '自动匹配',
+    glassToneDark: '深色毛玻璃',
+    glassToneLight: '浅色毛玻璃',
     fit: '填充方式',
     fitCover: '铺满裁剪 (Cover)',
     fitContain: '完整适应 (Contain)',
@@ -229,6 +239,24 @@ function mapObjectFit(fit) {
   return 'cover';
 }
 
+function resolveGlassTone(slot, store, themeMode) {
+  if (slot.glassTone === 'dark' || slot.glassTone === 'light') {
+    return slot.glassTone;
+  }
+  if (slot.mediaType === 'preset') {
+    const preset = store.findPreset(slot.presetId);
+    if (preset?.tone === 'dark' || preset?.tone === 'light') return preset.tone;
+    return preset?.recommendedTheme === 'dark' ? 'dark' : 'light';
+  }
+  if (slot.mediaType === 'image' || slot.mediaType === 'video') {
+    const item = store.findItem(slot.itemId);
+    if (item?.tone === 'dark' || item?.tone === 'light') return item.tone;
+    // Vivid photos and videos default to DSH smoked dark glass for crisp white text contrast.
+    return 'dark';
+  }
+  return themeMode === 'dark' ? 'dark' : 'light';
+}
+
 function createBackgroundController(store) {
   let rootContainer = null;
   let hostRef = null;
@@ -293,10 +321,12 @@ function createBackgroundController(store) {
       return;
     }
 
+    const glassTone = resolveGlassTone(slot, store, themeMode);
     hostRef.surface?.setWallpaperVars({
       scope: config.scope,
-      surfaceOpacity: slot.surfaceOpacity ?? 0.84,
-      glassBlurPx: slot.glassBlurPx ?? 16,
+      surfaceOpacity: slot.surfaceOpacity ?? 0.36,
+      glassBlurPx: slot.glassBlurPx ?? 20,
+      tone: glassTone,
     });
 
     const blurPx = Math.max(0, Math.min(32, Number(slot.blurPx) || 0));
@@ -308,7 +338,7 @@ function createBackgroundController(store) {
       ? true
       : slot.scrimMode === 'light'
         ? false
-        : themeMode === 'dark';
+        : glassTone === 'dark';
     const scrimOpacity = Math.max(0, Math.min(0.85, Number(slot.scrimOpacity) || 0));
     const scrimBg = scrimIsDark
       ? `rgba(10, 12, 16, ${scrimOpacity})`
@@ -621,6 +651,53 @@ function formatBytes(bytes) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+function detectImageBlobTone(blob) {
+  return new Promise((resolve) => {
+    try {
+      const url = URL.createObjectURL(blob);
+      const img = new Image();
+      let done = false;
+      const finish = (tone) => {
+        if (done) return;
+        done = true;
+        URL.revokeObjectURL(url);
+        resolve(tone);
+      };
+      const timer = setTimeout(() => finish(null), 3000);
+      img.onload = () => {
+        try {
+          const size = 32;
+          const canvas = document.createElement('canvas');
+          canvas.width = size;
+          canvas.height = size;
+          const ctx = canvas.getContext('2d', { willReadFrequently: true });
+          if (!ctx) { clearTimeout(timer); finish(null); return; }
+          ctx.drawImage(img, 0, 0, size, size);
+          const data = ctx.getImageData(0, 0, size, size).data;
+          let sum = 0;
+          let count = 0;
+          for (let i = 0; i < data.length; i += 4) {
+            const alpha = data[i + 3] / 255;
+            if (alpha < 0.1) continue;
+            sum += (0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]);
+            count += 1;
+          }
+          clearTimeout(timer);
+          if (count === 0) { finish(null); return; }
+          finish((sum / count) > 168 ? 'light' : 'dark');
+        } catch {
+          clearTimeout(timer);
+          finish(null);
+        }
+      };
+      img.onerror = () => { clearTimeout(timer); finish(null); };
+      img.src = url;
+    } catch {
+      resolve(null);
+    }
+  });
+}
+
 function captureVideoPosterBlob(file) {
   return new Promise((resolve) => {
     try {
@@ -856,10 +933,14 @@ function createSettingsController(store) {
     errorMsg = null;
     render();
     try {
+      const detectedImageTone = file.type?.startsWith('image/')
+        ? await detectImageBlobTone(file)
+        : null;
       const res = await hostRef.rpcRaw('POST', '/wallpapers/upload', {
         headers: {
           'Content-Type': file.type || 'application/octet-stream',
           'X-File-Name': encodeURIComponent(file.name || 'wallpaper'),
+          ...(detectedImageTone ? { 'X-Media-Tone': detectedImageTone } : {}),
         },
         body: file,
       });
@@ -871,8 +952,12 @@ function createSettingsController(store) {
       if (uploadedItem?.kind === 'video') {
         const posterBlob = await captureVideoPosterBlob(file);
         if (posterBlob) {
+          const posterTone = await detectImageBlobTone(posterBlob);
           const posterRes = await hostRef.rpcRaw('POST', `/wallpapers/upload?posterOf=${encodeURIComponent(uploadedItem.id)}`, {
-            headers: { 'Content-Type': posterBlob.type || 'image/jpeg' },
+            headers: {
+              'Content-Type': posterBlob.type || 'image/jpeg',
+              ...(posterTone ? { 'X-Media-Tone': posterTone } : {}),
+            },
             body: posterBlob,
           });
           if (posterRes.ok) {
@@ -1242,12 +1327,48 @@ function createSettingsController(store) {
     if (slot) {
       const fxSec = document.createElement('section');
       fxSec.className = 'cwwp-sec';
+      const fxHead = document.createElement('div');
+      fxHead.className = 'cwwp-sec-head';
       const fxTitle = document.createElement('h3');
       fxTitle.className = 'cwwp-sec-title';
       fxTitle.textContent = t('effectsTitle');
+      const resetFxBtn = document.createElement('button');
+      resetFxBtn.type = 'button';
+      resetFxBtn.className = 'cwwp-btn';
+      resetFxBtn.style.padding = '3px 8px';
+      resetFxBtn.style.fontSize = '11px';
+      resetFxBtn.textContent = t('resetEffects');
+      resetFxBtn.onclick = () => updateDraft((d) => {
+        const target = getActiveSlot(d);
+        if (!target) return;
+        target.blurPx = 0;
+        target.scrimOpacity = 0.22;
+        target.scrimMode = 'auto';
+        target.glassTone = 'auto';
+        target.surfaceOpacity = 0.36;
+        target.glassBlurPx = 20;
+        target.fit = 'cover';
+        target.positionX = 50;
+        target.positionY = 50;
+      });
+      fxHead.append(fxTitle, resetFxBtn);
 
       const sliders = document.createElement('div');
       sliders.className = 'cwwp-sliders';
+
+      const glassToneLabel = document.createElement('span');
+      glassToneLabel.textContent = t('glassTone');
+      const glassToneSeg = document.createElement('div');
+      glassToneSeg.className = 'cwwp-seg';
+      for (const [val, labelKey] of [['auto', 'glassToneAuto'], ['dark', 'glassToneDark'], ['light', 'glassToneLight']]) {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.setAttribute('aria-pressed', String((slot.glassTone || 'auto') === val));
+        b.textContent = t(labelKey);
+        b.onclick = () => updateDraft((d) => { const s = getActiveSlot(d); if (s) s.glassTone = val; });
+        glassToneSeg.appendChild(b);
+      }
+      sliders.append(glassToneLabel, glassToneSeg);
 
       if (slot.mediaType === 'image' || slot.mediaType === 'video') {
         const fitLabel = document.createElement('span');
@@ -1337,8 +1458,8 @@ function createSettingsController(store) {
       sliders.appendChild(buildSlider({
         label: t('surfaceOpacity'),
         value: Math.round(slot.surfaceOpacity * 100),
-        min: 35,
-        max: 98,
+        min: 8,
+        max: 90,
         step: 1,
         display: `${Math.round(slot.surfaceOpacity * 100)}%`,
         onChange: (v) => {
@@ -1378,7 +1499,7 @@ function createSettingsController(store) {
         }));
       }
 
-      fxSec.append(fxTitle, sliders);
+      fxSec.append(fxHead, sliders);
       scroll.appendChild(fxSec);
     }
 

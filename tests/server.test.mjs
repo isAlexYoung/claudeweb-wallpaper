@@ -41,8 +41,13 @@ test('serves default config, updates with optimistic revision locking, and rejec
     assert.equal(initialRes.status, 200);
     const initial = await initialRes.json();
     assert.equal(initial.config.schema, 1);
+    assert.equal(initial.config.glassEngine, 2);
     assert.equal(initial.config.revision, 1);
+    assert.equal(initial.config.themes.dark.surfaceOpacity, 0.36);
+    assert.equal(initial.config.themes.dark.glassBlurPx, 20);
+    assert.equal(initial.config.themes.dark.glassTone, 'auto');
     assert.ok(initial.presets.length >= 6);
+    assert.ok(initial.presets.every((p) => p.tone === 'dark' || p.tone === 'light'));
 
     // Save revision 1 -> 2
     const save1 = await fetch(`${srv.baseUrl}/config`, {
@@ -111,13 +116,15 @@ test('uploads image/video with magic-byte sniffing, rejects SVG, streams Range/2
     assert.equal(videoData.item.kind, 'video');
     assert.equal(videoData.item.mimeType, 'video/mp4');
 
-    // Attach PNG poster to video
+    // Attach PNG poster to video with detected luminance tone
     const posterRes = await fetch(`${srv.baseUrl}/wallpapers/upload?posterOf=${videoData.item.id}`, {
       method: 'POST',
-      headers: { 'Content-Type': 'image/png' },
+      headers: { 'Content-Type': 'image/png', 'X-Media-Tone': 'dark' },
       body: PNG_SAMPLE,
     });
     assert.equal(posterRes.status, 201);
+    const posterData = await posterRes.json();
+    assert.equal(posterData.item.tone, 'dark');
 
     // Stream video with Range/206
     const rangeRes = await fetch(`${srv.baseUrl}/media/${videoData.item.id}`, {
@@ -172,5 +179,46 @@ test('exposes Wallpaper Engine Phase 3 support contract and config export/import
     assert.equal((await impRes.json()).config.scope, 'chat');
   } finally {
     await srv.stop();
+  }
+});
+
+test('migrates v1.0.0 untouched opaque defaults (0.84/16) to v1.1.0 translucent glass while preserving custom opacity', async () => {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-wp-migrate-'));
+  try {
+    fs.writeFileSync(
+      path.join(dataDir, 'config.json'),
+      JSON.stringify({
+        schema: 1,
+        revision: 4,
+        scope: 'workspace',
+        perTheme: true,
+        shared: { mediaType: 'preset', presetId: 'warm-sand', surfaceOpacity: 0.84, glassBlurPx: 16 },
+        themes: {
+          warm: { mediaType: 'preset', presetId: 'dark-aurora', surfaceOpacity: 0.84, glassBlurPx: 16 },
+          light: { mediaType: 'preset', presetId: 'light-mist', surfaceOpacity: 0.52, glassBlurPx: 12 },
+          dark: { mediaType: 'preset', presetId: 'dark-ember', surfaceOpacity: 0.84, glassBlurPx: 16 },
+        },
+      }),
+    );
+
+    const instance = createWallpaperServer({ dataDir });
+    await new Promise((resolve) => instance.server.listen(0, '127.0.0.1', resolve));
+    const { port } = instance.server.address();
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/config`);
+      assert.equal(res.status, 200);
+      const body = await res.json();
+      assert.equal(body.config.glassEngine, 2);
+      assert.equal(body.config.themes.warm.surfaceOpacity, 0.36);
+      assert.equal(body.config.themes.warm.glassBlurPx, 20);
+      // User-customized opacity below 0.80 stays untouched
+      assert.equal(body.config.themes.light.surfaceOpacity, 0.52);
+      assert.equal(body.config.themes.light.glassBlurPx, 12);
+      assert.equal(fs.existsSync(path.join(dataDir, 'config.v1-glass.bak.json')), true);
+    } finally {
+      await instance.close();
+    }
+  } finally {
+    fs.rmSync(dataDir, { recursive: true, force: true });
   }
 });
