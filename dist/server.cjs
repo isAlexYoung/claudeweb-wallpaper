@@ -73,9 +73,9 @@ const __modules = {
   "wallpaperEngine": {
     "adapterVersion": 1,
     "status": "video-supported",
-    "maxPackageBytes": 268435456,
+    "maxPackageBytes": 536870912,
     "supportedTypes": [
-      "video (MP4/WebM with project.json + optional preview poster — import a single workshop folder, the entire Steam 431960 folder, or a .zip package, up to 256 MB)"
+      "video (MP4/WebM with project.json + optional preview poster — import a single workshop folder, the entire Steam 431960 folder with remembered directory refresh, or a .zip package, up to 512 MB)"
     ],
     "unsupportedTypes": [
       "scene (.pkg proprietary DirectX/OpenGL shader scenes)",
@@ -97,7 +97,7 @@ const zlib = require('node:zlib');
 const MAX_ZIP_ENTRIES = 512;
 const MAX_PROJECT_JSON_BYTES = 2 * 1024 * 1024; // 2 MiB
 const MAX_POSTER_BYTES = 16 * 1024 * 1024; // 16 MiB
-const DEFAULT_MAX_EXTRACT_BYTES = 256 * 1024 * 1024; // 256 MiB
+const DEFAULT_MAX_EXTRACT_BYTES = 512 * 1024 * 1024; // 512 MiB
 const EOCD_SIG = 0x06054b50;
 const ZIP64_LOCATOR_SIG = 0x07064b50;
 const ZIP64_EOCD_SIG = 0x06064b50;
@@ -566,7 +566,7 @@ const path = require('node:path');
 
 const SCHEMA_VERSION = 1;
 const GLASS_ENGINE_VERSION = 2;
-const MAX_UPLOAD_BYTES = 256 * 1024 * 1024; // 256 MiB (supports 4K Wallpaper Engine MP4/WebM via chunked upload)
+const MAX_UPLOAD_BYTES = 512 * 1024 * 1024; // 512 MiB (supports 4K60 Wallpaper Engine MP4/WebM via chunked upload)
 const MAX_SINGLE_REQUEST_BYTES = 96 * 1024 * 1024; // 96 MiB single-request stream (inside ClaudeWeb 100 MiB proxy limit)
 const MAX_CHUNK_BYTES = 16 * 1024 * 1024; // 16 MiB max chunk
 const UPLOAD_SESSION_TTL_MS = 15 * 60 * 1000;

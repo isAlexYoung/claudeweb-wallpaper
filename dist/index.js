@@ -17,13 +17,18 @@ const MESSAGES = {
     uploadBtn: 'Upload Image / Video',
     uploading: 'Uploading…',
     uploadingProgress: 'Uploading {{percent}}% ({{loaded}} / {{total}})',
-    uploadHint: 'PNG, JPG, WebP, AVIF, GIF, MP4, WebM, or Wallpaper Engine .zip (max 256 MB)',
+    uploadHint: 'PNG, JPG, WebP, AVIF, GIF, MP4, WebM, or Wallpaper Engine .zip (max 512 MB)',
     noUploads: 'No uploaded wallpapers yet.',
     deleteItem: 'Delete',
     weSectionTitle: 'Wallpaper Engine (Video)',
     weSelectFolder: 'Select Folder / 431960',
+    weChangeFolder: 'Change Folder',
+    weRefreshFolder: 'Refresh: {{name}}',
+    weCopyPath: 'Copy 431960 Path',
+    weCopiedPathToast: 'Copied Steam Workshop path — paste it into the folder address bar.',
+    wePermissionDenied: 'Folder read permission was denied. Click again and allow read access.',
     weImportZip: 'Import .zip Package',
-    weFolderHint: 'Pick a single Wallpaper Engine video folder or your entire Steam steamapps/workshop/content/431960 folder — scanned locally in your browser before uploading.',
+    weFolderHint: 'Pick a single video folder or your whole Steam 431960 library (up to 512 MB). Chrome remembers the folder for one-click refresh later.',
     weScanning: 'Scanning folder…',
     weFoundCount: 'Found {{count}} Video wallpaper(s)',
     weSkippedSummary: 'Skipped {{details}} (Video MP4/WebM only)',
@@ -99,13 +104,18 @@ const MESSAGES = {
     uploadBtn: '上传图片 / 视频',
     uploading: '上传中…',
     uploadingProgress: '上传中 {{percent}}%（{{loaded}} / {{total}}）',
-    uploadHint: '支持 PNG、JPG、WebP、AVIF、GIF、MP4、WebM 或 Wallpaper Engine .zip 包（最大 256 MB）',
+    uploadHint: '支持 PNG、JPG、WebP、AVIF、GIF、MP4、WebM 或 Wallpaper Engine .zip 包（最大 512 MB）',
     noUploads: '尚未上传自定义壁纸。',
     deleteItem: '删除',
     weSectionTitle: 'Wallpaper Engine（视频壁纸）',
     weSelectFolder: '选择壁纸文件夹 / 431960',
+    weChangeFolder: '更换目录',
+    weRefreshFolder: '刷新壁纸库：{{name}}',
+    weCopyPath: '复制 431960 路径',
+    weCopiedPathToast: '已复制默认 Steam 431960 路径，可直接粘贴到文件夹地址栏。',
+    wePermissionDenied: '未获得文件夹读取权限，请再次点击并允许查看文件。',
     weImportZip: '导入 .zip 工程包',
-    weFolderHint: '可直接选择单个壁纸目录，或直接选整个 Steam steamapps/workshop/content/431960 目录；浏览器先本地扫描预览，点击导入才上传。',
+    weFolderHint: '可选单个视频壁纸目录或整个 Steam 431960 目录（单文件最大 512 MB）。Chrome 会记住该目录，下次点「刷新壁纸库」即可直接扫描新壁纸。',
     weScanning: '正在扫描文件夹…',
     weFoundCount: '发现 {{count}} 个视频壁纸',
     weSkippedSummary: '已跳过 {{details}}（当前仅支持 MP4/WebM 视频壁纸）',
@@ -914,6 +924,226 @@ async function scanWallpaperEngineFolderFiles(fileList) {
   };
 }
 
+const WE_HANDLE_DB_NAME = 'cw-wallpaper-handles';
+const WE_HANDLE_STORE = 'handles';
+const WE_HANDLE_KEY = 'we-library';
+const DEFAULT_STEAM_431960_PATH = 'C:\\Program Files (x86)\\Steam\\steamapps\\workshop\\content\\431960';
+
+function openWeHandleDb() {
+  return new Promise((resolve, reject) => {
+    if (typeof indexedDB === 'undefined') {
+      resolve(null);
+      return;
+    }
+    try {
+      const req = indexedDB.open(WE_HANDLE_DB_NAME, 1);
+      req.onupgradeneeded = () => {
+        const db = req.result;
+        if (!db.objectStoreNames.contains(WE_HANDLE_STORE)) {
+          db.createObjectStore(WE_HANDLE_STORE);
+        }
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => resolve(null);
+    } catch {
+      resolve(null);
+    }
+  });
+}
+
+async function loadSavedWeDirHandle() {
+  const db = await openWeHandleDb();
+  if (!db) return null;
+  return new Promise((resolve) => {
+    try {
+      const tx = db.transaction(WE_HANDLE_STORE, 'readonly');
+      const req = tx.objectStore(WE_HANDLE_STORE).get(WE_HANDLE_KEY);
+      req.onsuccess = () => resolve(req.result || null);
+      req.onerror = () => resolve(null);
+    } catch {
+      resolve(null);
+    }
+  });
+}
+
+async function saveWeDirHandle(handle) {
+  const db = await openWeHandleDb();
+  if (!db) return;
+  return new Promise((resolve) => {
+    try {
+      const tx = db.transaction(WE_HANDLE_STORE, 'readwrite');
+      if (handle) tx.objectStore(WE_HANDLE_STORE).put(handle, WE_HANDLE_KEY);
+      else tx.objectStore(WE_HANDLE_STORE).delete(WE_HANDLE_KEY);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => resolve();
+    } catch {
+      resolve();
+    }
+  });
+}
+
+async function resolveRelativeHandleFile(dirHandle, relPath) {
+  const segments = normalizeRelPath(relPath).split('/').filter(Boolean);
+  if (segments.length === 0) return null;
+  let current = dirHandle;
+  for (let i = 0; i < segments.length; i += 1) {
+    const seg = segments[i];
+    const isLast = i === segments.length - 1;
+    try {
+      if (isLast) {
+        const fh = await current.getFileHandle(seg);
+        return await fh.getFile();
+      }
+      current = await current.getDirectoryHandle(seg);
+    } catch {
+      // Fallback to case-insensitive directory scan for Windows/cross-platform project.json casing.
+      let matched = null;
+      const targetLower = seg.toLowerCase();
+      try {
+        for await (const [entryName, entryHandle] of current.entries()) {
+          if (entryName.toLowerCase() === targetLower) {
+            if (isLast && entryHandle.kind === 'file') {
+              matched = entryHandle;
+              break;
+            }
+            if (!isLast && entryHandle.kind === 'directory') {
+              matched = entryHandle;
+              break;
+            }
+          }
+        }
+      } catch {
+        return null;
+      }
+      if (!matched) return null;
+      if (isLast) return await matched.getFile();
+      current = matched;
+    }
+  }
+  return null;
+}
+
+async function inspectSingleWeDirHandle(folderHandle, folderName, isSingleFolderPick, candidates, skippedByType, unsupportedContainers) {
+  let projFile;
+  try {
+    const fh = await folderHandle.getFileHandle('project.json');
+    projFile = await fh.getFile();
+  } catch {
+    return false;
+  }
+
+  let project;
+  try {
+    const rawText = (await projFile.text()).replace(/^\uFEFF/, '');
+    project = JSON.parse(rawText);
+  } catch {
+    return true;
+  }
+  if (!project || typeof project !== 'object') return true;
+
+  const rawType = typeof project.type === 'string' ? project.type.trim().toLowerCase() : 'unknown';
+  const title = typeof project.title === 'string' && project.title.trim()
+    ? project.title.trim().slice(0, 80)
+    : folderName || 'Wallpaper';
+
+  if (rawType !== 'video') {
+    skippedByType[rawType] = (skippedByType[rawType] || 0) + 1;
+    if (isSingleFolderPick) {
+      candidates.push({ rejected: 'type', type: rawType, title });
+    }
+    return true;
+  }
+
+  const declaredFile = typeof project.file === 'string' ? normalizeRelPath(project.file.trim()) : '';
+  if (!declaredFile) return true;
+  const videoFile = await resolveRelativeHandleFile(folderHandle, declaredFile);
+  if (!videoFile) return true;
+
+  const sniffedMime = await sniffBrowserVideoMime(videoFile);
+  if (!sniffedMime) {
+    unsupportedContainers.push({ title, file: declaredFile });
+    if (isSingleFolderPick) {
+      candidates.push({ rejected: 'container', file: declaredFile, title });
+    }
+    return true;
+  }
+
+  let previewFile = null;
+  if (typeof project.preview === 'string' && project.preview.trim()) {
+    previewFile = await resolveRelativeHandleFile(folderHandle, project.preview.trim());
+  }
+
+  const workshopId = project.workshopid !== undefined && project.workshopid !== null
+    ? String(project.workshopid).replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 32)
+    : (/^\d{6,16}$/.test(folderName) ? folderName : null);
+  const tags = Array.isArray(project.tags)
+    ? project.tags.filter((x) => typeof x === 'string' && x.trim()).map((x) => x.trim().slice(0, 24)).slice(0, 8)
+    : [];
+
+  candidates.push({
+    id: `${folderName || title}::${videoFile.size}`,
+    title,
+    workshopId: workshopId || null,
+    tags,
+    videoFile,
+    videoMime: sniffedMime,
+    previewFile,
+    previewUrl: previewFile ? URL.createObjectURL(previewFile) : null,
+    bytes: videoFile.size,
+    importedItemId: null,
+  });
+  return true;
+}
+
+async function scanWallpaperEngineDirectoryHandle(rootHandle) {
+  const candidates = [];
+  const skippedByType = {};
+  const unsupportedContainers = [];
+
+  // Case 1: Selected folder itself contains project.json (single wallpaper folder)
+  let rootHasProject = false;
+  try {
+    await rootHandle.getFileHandle('project.json');
+    rootHasProject = true;
+  } catch { /* check children */ }
+
+  if (rootHasProject) {
+    await inspectSingleWeDirHandle(rootHandle, rootHandle.name || '', true, candidates, skippedByType, unsupportedContainers);
+    return { totalFolders: 1, candidates, skippedByType, unsupportedContainers };
+  }
+
+  // Case 2: Library folder (e.g. Steam 431960) containing workshop subdirectories
+  let totalFolders = 0;
+  for await (const [childName, childHandle] of rootHandle.entries()) {
+    if (childHandle.kind !== 'directory') continue;
+    const found = await inspectSingleWeDirHandle(childHandle, childName, false, candidates, skippedByType, unsupportedContainers);
+    if (found) totalFolders += 1;
+  }
+
+  return { totalFolders, candidates, skippedByType, unsupportedContainers };
+}
+
+async function copyTextToClipboard(text) {
+  try {
+    if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch { /* fall through */ }
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.cssText = 'position:fixed;left:-9999px;top:0;opacity:0;';
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    ta.remove();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function createSettingsController(store) {
   let rootContainer = null;
   let hostRef = null;
@@ -925,6 +1155,7 @@ function createSettingsController(store) {
   let scanningWe = false;
   let uploadProgress = null; // { label, percent, loaded, total }
   let activeUploadId = null;
+  let savedWeDirHandle = null; // Remembered Chrome FileSystemDirectoryHandle (IndexedDB)
   let weDiscovered = []; // Array of discovered local WE video candidates
   let weSkippedNote = '';
   let errorMsg = null;
@@ -1331,6 +1562,119 @@ function createSettingsController(store) {
     }
   }
 
+  async function applyWallpaperEngineScanResult(scan) {
+    if (scan.candidates.length === 1 && scan.candidates[0].rejected === 'type') {
+      errorMsg = t('weUnsupportedTypeErr', {
+        title: scan.candidates[0].title,
+        type: scan.candidates[0].type,
+      });
+      render();
+      return;
+    }
+    if (scan.candidates.length === 1 && scan.candidates[0].rejected === 'container') {
+      errorMsg = t('weUnsupportedContainerErr', {
+        title: scan.candidates[0].title,
+        file: scan.candidates[0].file,
+      });
+      render();
+      return;
+    }
+
+    const valid = scan.candidates.filter((c) => !c.rejected);
+    const skippedParts = Object.entries(scan.skippedByType)
+      .map(([kind, count]) => `${count} ${kind}`);
+    if (scan.unsupportedContainers.length > 0) {
+      skippedParts.push(`${scan.unsupportedContainers.length} non-MP4/WebM`);
+    }
+    weSkippedNote = skippedParts.length > 0 ? t('weSkippedSummary', { details: skippedParts.join(', ') }) : '';
+
+    if (valid.length === 0) {
+      errorMsg = weSkippedNote || t('weNoVideosInFolder');
+      weSkippedNote = '';
+      render();
+      return;
+    }
+
+    // Single workshop folder containing one Video wallpaper -> import immediately!
+    if (scan.totalFolders === 1 && valid.length === 1) {
+      const single = valid[0];
+      try {
+        await importWeVideoCandidate(single);
+      } finally {
+        if (single.previewUrl) {
+          try { URL.revokeObjectURL(single.previewUrl); } catch { /* ignore */ }
+        }
+      }
+      return;
+    }
+
+    // Multiple workshop folders (e.g. Steam 431960 root) -> show local preview picker before uploading!
+    const existingByWorkshop = new Set(
+      (store.getState().items || []).map((it) => it.workshopId).filter(Boolean),
+    );
+    for (const c of valid) {
+      if (c.workshopId && existingByWorkshop.has(c.workshopId)) {
+        const match = store.getState().items.find((it) => it.workshopId === c.workshopId);
+        if (match) c.importedItemId = match.id;
+      }
+    }
+    weDiscovered = valid;
+    render();
+  }
+
+  async function scanRememberedWeHandle(handle) {
+    if (!handle || !hostRef || uploading || scanningWe) return;
+    scanningWe = true;
+    errorMsg = null;
+    revokeWePreviewUrls();
+    render();
+    try {
+      if (typeof handle.queryPermission === 'function') {
+        let perm = await handle.queryPermission({ mode: 'read' });
+        if (perm !== 'granted' && typeof handle.requestPermission === 'function') {
+          perm = await handle.requestPermission({ mode: 'read' });
+        }
+        if (perm !== 'granted') {
+          scanningWe = false;
+          errorMsg = t('wePermissionDenied');
+          render();
+          return;
+        }
+      }
+      const scan = await scanWallpaperEngineDirectoryHandle(handle);
+      scanningWe = false;
+      await applyWallpaperEngineScanResult(scan);
+    } catch (err) {
+      scanningWe = false;
+      if (err && err.name === 'NotFoundError') {
+        savedWeDirHandle = null;
+        await saveWeDirHandle(null);
+      }
+      if (err && err.name !== 'AbortError') {
+        errorMsg = err instanceof Error ? err.message : String(err);
+      }
+      render();
+    }
+  }
+
+  async function pickWallpaperEngineDirectory(fallbackInput) {
+    if (!hostRef || uploading || scanningWe) return;
+    if (typeof window !== 'undefined' && typeof window.showDirectoryPicker === 'function') {
+      try {
+        const handle = await window.showDirectoryPicker({ id: 'cw-we-library', mode: 'read' });
+        savedWeDirHandle = handle;
+        await saveWeDirHandle(handle);
+        await scanRememberedWeHandle(handle);
+      } catch (err) {
+        if (err && err.name === 'AbortError') return;
+        // Fallback to classic webkitdirectory if showDirectoryPicker fails in restricted contexts.
+        fallbackInput?.click();
+      }
+      return;
+    }
+    fallbackInput?.click();
+  }
+
   async function handleWallpaperEngineFolderSelect(fileList) {
     if (!fileList || fileList.length === 0 || !hostRef || uploading || scanningWe) return;
     scanningWe = true;
@@ -1340,64 +1684,7 @@ function createSettingsController(store) {
     try {
       const scan = await scanWallpaperEngineFolderFiles(fileList);
       scanningWe = false;
-
-      if (scan.candidates.length === 1 && scan.candidates[0].rejected === 'type') {
-        errorMsg = t('weUnsupportedTypeErr', {
-          title: scan.candidates[0].title,
-          type: scan.candidates[0].type,
-        });
-        render();
-        return;
-      }
-      if (scan.candidates.length === 1 && scan.candidates[0].rejected === 'container') {
-        errorMsg = t('weUnsupportedContainerErr', {
-          title: scan.candidates[0].title,
-          file: scan.candidates[0].file,
-        });
-        render();
-        return;
-      }
-
-      const valid = scan.candidates.filter((c) => !c.rejected);
-      const skippedParts = Object.entries(scan.skippedByType)
-        .map(([kind, count]) => `${count} ${kind}`);
-      if (scan.unsupportedContainers.length > 0) {
-        skippedParts.push(`${scan.unsupportedContainers.length} non-MP4/WebM`);
-      }
-      weSkippedNote = skippedParts.length > 0 ? t('weSkippedSummary', { details: skippedParts.join(', ') }) : '';
-
-      if (valid.length === 0) {
-        errorMsg = weSkippedNote || t('weNoVideosInFolder');
-        weSkippedNote = '';
-        render();
-        return;
-      }
-
-      // Single workshop folder containing one Video wallpaper -> import immediately!
-      if (scan.totalFolders === 1 && valid.length === 1) {
-        const single = valid[0];
-        try {
-          await importWeVideoCandidate(single);
-        } finally {
-          if (single.previewUrl) {
-            try { URL.revokeObjectURL(single.previewUrl); } catch { /* ignore */ }
-          }
-        }
-        return;
-      }
-
-      // Multiple workshop folders (e.g. Steam 431960 root) -> show local preview picker before uploading!
-      const existingByWorkshop = new Set(
-        (store.getState().items || []).map((it) => it.workshopId).filter(Boolean),
-      );
-      for (const c of valid) {
-        if (c.workshopId && existingByWorkshop.has(c.workshopId)) {
-          const match = store.getState().items.find((it) => it.workshopId === c.workshopId);
-          if (match) c.importedItemId = match.id;
-        }
-      }
-      weDiscovered = valid;
-      render();
+      await applyWallpaperEngineScanResult(scan);
     } catch (err) {
       scanningWe = false;
       errorMsg = err instanceof Error ? err.message : String(err);
@@ -1799,12 +2086,30 @@ function createSettingsController(store) {
 
     const weActions = document.createElement('div');
     weActions.className = 'cwwp-we-actions';
+    weActions.append(weFolderInput, weZipInput);
+
+    if (savedWeDirHandle) {
+      const refreshWeBtn = document.createElement('button');
+      refreshWeBtn.type = 'button';
+      refreshWeBtn.className = 'cwwp-btn cwwp-btn-primary';
+      refreshWeBtn.disabled = uploading || scanningWe;
+      refreshWeBtn.textContent = scanningWe
+        ? t('weScanning')
+        : t('weRefreshFolder', { name: savedWeDirHandle.name || '431960' });
+      refreshWeBtn.onclick = () => void scanRememberedWeHandle(savedWeDirHandle);
+      weActions.appendChild(refreshWeBtn);
+    }
+
     const weFolderBtn = document.createElement('button');
     weFolderBtn.type = 'button';
     weFolderBtn.className = 'cwwp-btn';
     weFolderBtn.disabled = uploading || scanningWe;
-    weFolderBtn.textContent = scanningWe ? t('weScanning') : t('weSelectFolder');
-    weFolderBtn.onclick = () => weFolderInput.click();
+    weFolderBtn.textContent = scanningWe && !savedWeDirHandle
+      ? t('weScanning')
+      : savedWeDirHandle
+        ? t('weChangeFolder')
+        : t('weSelectFolder');
+    weFolderBtn.onclick = () => void pickWallpaperEngineDirectory(weFolderInput);
 
     const weZipBtn = document.createElement('button');
     weZipBtn.type = 'button';
@@ -1813,7 +2118,18 @@ function createSettingsController(store) {
     weZipBtn.textContent = t('weImportZip');
     weZipBtn.onclick = () => weZipInput.click();
 
-    weActions.append(weFolderInput, weZipInput, weFolderBtn, weZipBtn);
+    const copyPathBtn = document.createElement('button');
+    copyPathBtn.type = 'button';
+    copyPathBtn.className = 'cwwp-btn';
+    copyPathBtn.disabled = uploading || scanningWe;
+    copyPathBtn.textContent = t('weCopyPath');
+    copyPathBtn.title = DEFAULT_STEAM_431960_PATH;
+    copyPathBtn.onclick = async () => {
+      const ok = await copyTextToClipboard(DEFAULT_STEAM_431960_PATH);
+      if (ok) hostRef?.ui?.notify?.(t('weCopiedPathToast'), 'info');
+    };
+
+    weActions.append(weFolderBtn, weZipBtn, copyPathBtn);
     const weHint = document.createElement('p');
     weHint.className = 'cwwp-hint';
     weHint.textContent = t('weFolderHint');
@@ -2341,10 +2657,14 @@ function createSettingsController(store) {
       conflictServerConfig = null;
 
       try {
-        const data = await host.rpc('GET', '/config');
+        const [data, rememberedHandle] = await Promise.all([
+          host.rpc('GET', '/config'),
+          loadSavedWeDirHandle(),
+        ]);
         if (host.signal.aborted) return;
         store.setServerSnapshot(data);
         draft = deepClone(data.config);
+        savedWeDirHandle = rememberedHandle;
       } catch (err) {
         errorMsg = err instanceof Error ? err.message : String(err);
       }

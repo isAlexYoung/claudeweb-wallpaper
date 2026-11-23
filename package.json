@@ -1,6 +1,6 @@
 {
   "name": "claudeweb-wallpaper",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "private": true,
   "description": "Static, animated/video, per-theme, and login-screen wallpaper plugin for ClaudeWeb (Plugin Host v2).",
   "license": "MIT",

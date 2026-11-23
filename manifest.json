@@ -12,7 +12,7 @@
   ],
   "name": "claudeweb-wallpaper",
   "displayName": "Wallpaper",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Custom static, animated/video, Wallpaper Engine video, per-theme, and login-screen wallpapers with live workspace glassmorphism.",
   "author": "isAlexYoung",
   "icon": "icon.svg",
@@ -33,8 +33,8 @@
   "build": {
     "mode": "prebuilt",
     "integrity": {
-      "dist/index.js": "sha256-7ff1c651c77db84b36753478e1e359557870399a8ab39a2e690e98478bf67093",
-      "dist/server.cjs": "sha256-ac9a6095e937b986b8b42995438894fbd595f70555c4f4b9b070ab0377d617cd"
+      "dist/index.js": "sha256-033305fc5977d4da36a604cc6754ef96a669bdbaab3fbf7484235b59adcfd940",
+      "dist/server.cjs": "sha256-8304dee270576a1dec63256bc726c49cd37b53247861a0798412df5a2f1fc872"
     }
   },
   "permissions": [

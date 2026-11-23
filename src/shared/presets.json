@@ -68,9 +68,9 @@
   "wallpaperEngine": {
     "adapterVersion": 1,
     "status": "video-supported",
-    "maxPackageBytes": 268435456,
+    "maxPackageBytes": 536870912,
     "supportedTypes": [
-      "video (MP4/WebM with project.json + optional preview poster — import a single workshop folder, the entire Steam 431960 folder, or a .zip package, up to 256 MB)"
+      "video (MP4/WebM with project.json + optional preview poster — import a single workshop folder, the entire Steam 431960 folder with remembered directory refresh, or a .zip package, up to 512 MB)"
     ],
     "unsupportedTypes": [
       "scene (.pkg proprietary DirectX/OpenGL shader scenes)",

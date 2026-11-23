@@ -7,7 +7,7 @@ const path = require('node:path');
 
 const SCHEMA_VERSION = 1;
 const GLASS_ENGINE_VERSION = 2;
-const MAX_UPLOAD_BYTES = 256 * 1024 * 1024; // 256 MiB (supports 4K Wallpaper Engine MP4/WebM via chunked upload)
+const MAX_UPLOAD_BYTES = 512 * 1024 * 1024; // 512 MiB (supports 4K60 Wallpaper Engine MP4/WebM via chunked upload)
 const MAX_SINGLE_REQUEST_BYTES = 96 * 1024 * 1024; // 96 MiB single-request stream (inside ClaudeWeb 100 MiB proxy limit)
 const MAX_CHUNK_BYTES = 16 * 1024 * 1024; // 16 MiB max chunk
 const UPLOAD_SESSION_TTL_MS = 15 * 60 * 1000;

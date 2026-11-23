@@ -346,13 +346,23 @@ test('supports chunked streaming uploads, query-param metadata, offset checks, a
     assert.equal(doneData.item.bytes, bigMp4.length);
     assert.equal(doneData.item.source, 'wallpaper-engine');
 
-    // 3. Aborted upload deletes its temporary .part file cleanly
-    const abortInit = await fetch(`${srv.baseUrl}/wallpapers/upload/init`, {
+    // 3. Aborted upload deletes its temporary .part file cleanly & supports up to 512 MiB
+    const bigInit = await fetch(`${srv.baseUrl}/wallpapers/upload/init`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ mode: 'media', fileName: 'cancelled.mp4', totalBytes: 100 }),
+      body: JSON.stringify({ mode: 'media', fileName: '4k60-350mb.mp4', totalBytes: 350 * 1024 * 1024 }),
     });
-    const { uploadId: cancelId } = await abortInit.json();
+    assert.equal(bigInit.status, 201);
+    const { uploadId: cancelId, maxUploadBytes } = await bigInit.json();
+    assert.equal(maxUploadBytes, 512 * 1024 * 1024);
+
+    const tooBigInit = await fetch(`${srv.baseUrl}/wallpapers/upload/init`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode: 'media', fileName: 'huge-600mb.mp4', totalBytes: 600 * 1024 * 1024 }),
+    });
+    assert.equal(tooBigInit.status, 413);
+
     const delRes = await fetch(`${srv.baseUrl}/wallpapers/upload/${cancelId}`, { method: 'DELETE' });
     assert.equal(delRes.status, 200);
     const tmpFiles = fs.readdirSync(path.join(srv.dataDir, 'tmp-uploads'));
