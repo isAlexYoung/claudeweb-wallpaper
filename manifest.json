@@ -1,0 +1,44 @@
+{
+  "manifestVersion": 2,
+  "minPluginApi": 2,
+  "requiredCapabilities": [
+    "slots:background",
+    "slots:settings",
+    "media-ticket",
+    "rpc-raw-stream",
+    "public-appearance-v1",
+    "surface-wallpaper-vars"
+  ],
+  "name": "claudeweb-wallpaper",
+  "displayName": "Wallpaper",
+  "version": "1.0.0",
+  "description": "Custom static, animated/video, per-theme, and login-screen wallpapers with live workspace glassmorphism.",
+  "author": "isAlexYoung",
+  "icon": "icon.svg",
+  "type": "module",
+  "slot": "background",
+  "slots": [
+    "background",
+    "settings"
+  ],
+  "panel": {
+    "title": "Wallpaper Studio",
+    "mode": "drawer",
+    "width": 440
+  },
+  "publicAppearance": true,
+  "entry": "dist/index.js",
+  "server": "dist/server.cjs",
+  "build": {
+    "mode": "prebuilt",
+    "integrity": {
+      "dist/index.js": "sha256-87d68b316dbf947d2718bfa0bfcacb895473319f496598f205cdc79b7c210764",
+      "dist/server.cjs": "sha256-a3d4a251913cb112149de6c7c5a546931ae090acf0476bf9c9a973149a9977bd"
+    }
+  },
+  "permissions": [
+    "storage",
+    "media",
+    "public-appearance"
+  ]
+}
