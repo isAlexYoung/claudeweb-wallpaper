@@ -14,8 +14,11 @@ Static, animated/video, per-theme, and login-screen wallpaper plugin for **Claud
   - Bind different wallpapers and glass settings to `warm`, `light`, and `dark`, switching automatically with ClaudeWeb's theme.
   - Uploaded photos and videos automatically sample image brightness so dark wallpapers get crisp white text + smoked dark glass even on Warm/Light themes, with one-click manual override (`Auto` / `Dark Glass` / `Light Glass`).
 - **Static, Animated & Video Wallpapers / 静态、动图与视频壁纸**
-  - Built-in curated theme gradients + local uploads (`PNG`, `JPEG`, `WebP`, `AVIF`, `GIF`, `MP4`, `WebM`, up to 50 MB).
-  - Streams via **Scoped Media Tickets** with full HTTP `Range` / `206` seeking, automatic background-tab pause (`visibilitychange`), automatic video poster capture, and `prefers-reduced-motion` static fallback.
+  - Built-in curated theme gradients + local uploads (`PNG`, `JPEG`, `WebP`, `AVIF`, `GIF`, `MP4`, `WebM`, up to **256 MB** via chunked upload with live progress bar).
+  - Streams via **Scoped Media Tickets** with full HTTP `Range` / `206` seeking, local browser GPU hardware decoding, automatic background-tab pause (`visibilitychange`), automatic video poster capture, and `prefers-reduced-motion` static fallback.
+- **Wallpaper Engine Video Import / Wallpaper Engine 视频壁纸导入**
+  - **Folder / Workshop Library Picker**: Select a single Wallpaper Engine video folder or your entire Steam `steamapps/workshop/content/431960` directory — scanned locally in the browser with preview thumbnails before uploading.
+  - **`.zip` Package Import**: Drop or select a zipped Wallpaper Engine Video package (`project.json` + MP4/WebM + `preview` poster) with streaming zero-dependency extraction and path-traversal / symlink / zip-bomb protection.
 - **Login Screen Sync / 登录页与加载页壁纸**
   - Optional `Single` or `Per-Theme` login appearance snapshot verified by the ClaudeWeb host (`/api/public/appearance`). Disabling clears it immediately.
 - **Live Drawer Preview & Multi-Device Safety / 抽屉实时预览与多端防冲突**
@@ -35,16 +38,14 @@ Requires ClaudeWeb with **Plugin Host v2** (`apiVersion >= 2`).
    ```
 3. Enable **Wallpaper** and click **Open Panel (打开面板)** to customize.
 
-## Wallpaper Engine Compatibility Roadmap (Phase 3)
+## Wallpaper Engine Support (Video Mode)
 
-This plugin reserves a source adapter layer for future Wallpaper Engine package imports with realistic web-platform boundaries:
-
-- **Planned support**:
-  - `video` packages (`MP4` / `WebM` + `project.json` + preview image).
-  - Best-effort pure static `web` packages inside a sandboxed `iframe` without external network access.
-- **Explicitly not supported**:
-  - `scene` (`.pkg` proprietary DirectX/OpenGL shader scenes) and `application` native executables.
-  - Wallpaper Engine proprietary browser APIs (`window.wallpaperRegisterAudioListener`, `window.wallpaperPropertyListener` custom bindings, iCUE/Chroma LED sync).
+- **Supported (`v1.2.0`)**:
+  - `video` packages (`MP4` / `WebM` with `project.json` + optional `preview` poster) via single folder, full Steam `431960` library picker, or `.zip` archive (up to 256 MB).
+  - Decoded directly on your browser's local GPU; ClaudeWeb's server only streams range-seekable media.
+- **Not currently supported**:
+  - `scene` (`.pkg` proprietary DirectX/OpenGL shader scenes), `web` (HTML/JS/WebGL), and `application` (`.exe`) packages.
+  - Non-browser video containers (`.mkv`, `.avi`, `.wmv`).
 
 ## Development / 开发与构建
 

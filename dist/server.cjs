@@ -72,18 +72,489 @@ const __modules = {
   ],
   "wallpaperEngine": {
     "adapterVersion": 1,
-    "status": "planned-phase-3",
+    "status": "video-supported",
+    "maxPackageBytes": 268435456,
     "supportedTypes": [
-      "video (MP4/WebM with project.json + preview poster)",
-      "web (best-effort pure static HTML/CSS/JS inside sandboxed iframe with no external network requests)"
+      "video (MP4/WebM with project.json + optional preview poster — import a single workshop folder, the entire Steam 431960 folder, or a .zip package, up to 256 MB)"
     ],
     "unsupportedTypes": [
       "scene (.pkg proprietary DirectX/OpenGL shader scenes)",
+      "web (HTML/JS/WebGL packages — not enabled in video-only mode)",
       "application (native executables)",
-      "Wallpaper Engine proprietary JS APIs (window.wallpaperRegisterAudioListener, window.wallpaperPropertyListener custom bindings, iCUE/Chroma LED sync)"
+      "non-browser video containers (.mkv, .avi, .wmv)"
     ]
   }
 };
+  },
+  './we-zip.cjs': (module, exports, require) => {
+'use strict';
+
+const crypto = require('node:crypto');
+const fs = require('node:fs');
+const path = require('node:path');
+const zlib = require('node:zlib');
+
+const MAX_ZIP_ENTRIES = 512;
+const MAX_PROJECT_JSON_BYTES = 2 * 1024 * 1024; // 2 MiB
+const MAX_POSTER_BYTES = 16 * 1024 * 1024; // 16 MiB
+const DEFAULT_MAX_EXTRACT_BYTES = 256 * 1024 * 1024; // 256 MiB
+const EOCD_SIG = 0x06054b50;
+const ZIP64_LOCATOR_SIG = 0x07064b50;
+const ZIP64_EOCD_SIG = 0x06064b50;
+const CD_SIG = 0x02014b50;
+const LFH_SIG = 0x04034b50;
+
+function makeError(message, statusCode = 400, code = 'INVALID_WE_PACKAGE') {
+  const err = new Error(message);
+  err.statusCode = statusCode;
+  err.code = code;
+  return err;
+}
+
+/**
+ * Validates and normalizes an archive entry path, blocking absolute paths,
+ * drive letters, null bytes, and `..` traversal segments.
+ */
+function normalizeZipEntryPath(rawName) {
+  if (typeof rawName !== 'string' || rawName.length === 0) return null;
+  if (rawName.includes('\0')) throw makeError('Archive contains invalid null-byte entry path', 400, 'UNSAFE_ZIP_PATH');
+  const slashNorm = rawName.replace(/\\/g, '/');
+  if (slashNorm.startsWith('/') || /^[a-zA-Z]:/.test(slashNorm)) {
+    throw makeError(`Archive entry uses an absolute path: ${rawName}`, 400, 'UNSAFE_ZIP_PATH');
+  }
+  const segments = slashNorm.split('/').filter((s) => s.length > 0 && s !== '.');
+  if (segments.some((s) => s === '..')) {
+    throw makeError(`Archive entry attempts path traversal: ${rawName}`, 400, 'UNSAFE_ZIP_PATH');
+  }
+  return segments.join('/');
+}
+
+function readUInt64LEAsSafeNumber(buf, offset) {
+  const lo = buf.readUInt32LE(offset);
+  const hi = buf.readUInt32LE(offset + 4);
+  const value = hi * 0x100000000 + lo;
+  if (!Number.isSafeInteger(value)) {
+    throw makeError('Archive entry exceeds safe integer bounds', 400, 'INVALID_ZIP');
+  }
+  return value;
+}
+
+/**
+ * Parses a ZIP archive's Central Directory directly from disk (constant small memory),
+ * rejecting symlinks, path traversal, encrypted entries, and excessive entry counts.
+ */
+function readZipDirectory(zipPath) {
+  const fd = fs.openSync(zipPath, 'r');
+  try {
+    const stat = fs.fstatSync(fd);
+    const fileSize = stat.size;
+    if (fileSize < 22) {
+      throw makeError('File is not a valid ZIP archive', 400, 'INVALID_ZIP');
+    }
+
+    // Locate End of Central Directory (EOCD) within the last 64 KiB + 22 bytes.
+    const tailLen = Math.min(fileSize, 65557);
+    const tailStart = fileSize - tailLen;
+    const tail = Buffer.allocUnsafe(tailLen);
+    fs.readSync(fd, tail, 0, tailLen, tailStart);
+
+    let eocdOffsetInTail = -1;
+    for (let i = tailLen - 22; i >= 0; i -= 1) {
+      if (tail.readUInt32LE(i) === EOCD_SIG) {
+        const commentLen = tail.readUInt16LE(i + 20);
+        if (i + 22 + commentLen === tailLen) {
+          eocdOffsetInTail = i;
+          break;
+        }
+      }
+    }
+    if (eocdOffsetInTail === -1) {
+      throw makeError('Could not locate ZIP central directory', 400, 'INVALID_ZIP');
+    }
+
+    const eocdAbsOffset = tailStart + eocdOffsetInTail;
+    let totalEntries = tail.readUInt16LE(eocdOffsetInTail + 10);
+    let cdSize = tail.readUInt32LE(eocdOffsetInTail + 12);
+    let cdOffset = tail.readUInt32LE(eocdOffsetInTail + 16);
+
+    // Handle ZIP64 EOCD when standard fields are 0xFFFF / 0xFFFFFFFF.
+    if (totalEntries === 0xffff || cdSize === 0xffffffff || cdOffset === 0xffffffff) {
+      if (eocdAbsOffset < 20) {
+        throw makeError('Corrupt ZIP64 locator', 400, 'INVALID_ZIP');
+      }
+      const locBuf = Buffer.allocUnsafe(20);
+      fs.readSync(fd, locBuf, 0, 20, eocdAbsOffset - 20);
+      if (locBuf.readUInt32LE(0) !== ZIP64_LOCATOR_SIG) {
+        throw makeError('Missing ZIP64 locator', 400, 'INVALID_ZIP');
+      }
+      const zip64EocdOffset = readUInt64LEAsSafeNumber(locBuf, 8);
+      if (zip64EocdOffset + 56 > fileSize) {
+        throw makeError('Corrupt ZIP64 EOCD offset', 400, 'INVALID_ZIP');
+      }
+      const z64 = Buffer.allocUnsafe(56);
+      fs.readSync(fd, z64, 0, 56, zip64EocdOffset);
+      if (z64.readUInt32LE(0) !== ZIP64_EOCD_SIG) {
+        throw makeError('Invalid ZIP64 EOCD signature', 400, 'INVALID_ZIP');
+      }
+      totalEntries = readUInt64LEAsSafeNumber(z64, 32);
+      cdSize = readUInt64LEAsSafeNumber(z64, 40);
+      cdOffset = readUInt64LEAsSafeNumber(z64, 48);
+    }
+
+    if (totalEntries > MAX_ZIP_ENTRIES) {
+      throw makeError(`ZIP archive has too many entries (max ${MAX_ZIP_ENTRIES})`, 400, 'ZIP_TOO_MANY_ENTRIES');
+    }
+    if (cdSize > 16 * 1024 * 1024 || cdOffset + cdSize > fileSize) {
+      throw makeError('ZIP central directory bounds are invalid', 400, 'INVALID_ZIP');
+    }
+
+    const cdBuf = Buffer.allocUnsafe(cdSize);
+    fs.readSync(fd, cdBuf, 0, cdSize, cdOffset);
+
+    const entries = [];
+    let pos = 0;
+    for (let idx = 0; idx < totalEntries; idx += 1) {
+      if (pos + 46 > cdBuf.length || cdBuf.readUInt32LE(pos) !== CD_SIG) {
+        throw makeError('Corrupt ZIP central directory entry', 400, 'INVALID_ZIP');
+      }
+      const versionMadeBy = cdBuf.readUInt16LE(pos + 4);
+      const flags = cdBuf.readUInt16LE(pos + 8);
+      const compressionMethod = cdBuf.readUInt16LE(pos + 10);
+      let compressedSize = cdBuf.readUInt32LE(pos + 20);
+      let uncompressedSize = cdBuf.readUInt32LE(pos + 24);
+      const fileNameLen = cdBuf.readUInt16LE(pos + 28);
+      const extraLen = cdBuf.readUInt16LE(pos + 30);
+      const commentLen = cdBuf.readUInt16LE(pos + 32);
+      const externalAttrs = cdBuf.readUInt32LE(pos + 38);
+      let localHeaderOffset = cdBuf.readUInt32LE(pos + 42);
+
+      const entryEnd = pos + 46 + fileNameLen + extraLen + commentLen;
+      if (entryEnd > cdBuf.length) {
+        throw makeError('Truncated ZIP central directory entry', 400, 'INVALID_ZIP');
+      }
+
+      const nameBuf = cdBuf.subarray(pos + 46, pos + 46 + fileNameLen);
+      const rawName = nameBuf.toString('utf8');
+      const extraBuf = cdBuf.subarray(pos + 46 + fileNameLen, pos + 46 + fileNameLen + extraLen);
+
+      // Parse ZIP64 extra field (header ID 0x0001) if needed.
+      if (compressedSize === 0xffffffff || uncompressedSize === 0xffffffff || localHeaderOffset === 0xffffffff) {
+        let ep = 0;
+        while (ep + 4 <= extraBuf.length) {
+          const headerId = extraBuf.readUInt16LE(ep);
+          const dataSize = extraBuf.readUInt16LE(ep + 2);
+          ep += 4;
+          if (headerId === 0x0001 && ep + dataSize <= extraBuf.length) {
+            let z = ep;
+            if (uncompressedSize === 0xffffffff && z + 8 <= ep + dataSize) {
+              uncompressedSize = readUInt64LEAsSafeNumber(extraBuf, z);
+              z += 8;
+            }
+            if (compressedSize === 0xffffffff && z + 8 <= ep + dataSize) {
+              compressedSize = readUInt64LEAsSafeNumber(extraBuf, z);
+              z += 8;
+            }
+            if (localHeaderOffset === 0xffffffff && z + 8 <= ep + dataSize) {
+              localHeaderOffset = readUInt64LEAsSafeNumber(extraBuf, z);
+            }
+            break;
+          }
+          ep += dataSize;
+        }
+      }
+
+      const isDirectory = rawName.endsWith('/') || rawName.endsWith('\\');
+      const normalized = normalizeZipEntryPath(rawName);
+
+      // Detect Unix symlinks (host OS === 3 Unix, mode bits 0o120000).
+      const hostOs = (versionMadeBy >>> 8) & 0xff;
+      const unixMode = (externalAttrs >>> 16) & 0xffff;
+      if (hostOs === 3 && (unixMode & 0o170000) === 0o120000) {
+        throw makeError(`Archive contains a disallowed symbolic link: ${rawName}`, 400, 'UNSAFE_ZIP_SYMLINK');
+      }
+
+      if (!isDirectory && normalized) {
+        entries.push({
+          path: normalized,
+          flags,
+          compressionMethod,
+          compressedSize,
+          uncompressedSize,
+          localHeaderOffset,
+        });
+      }
+
+      pos = entryEnd;
+    }
+
+    return entries;
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+function getLocalEntryDataStart(zipPath, entry) {
+  const fd = fs.openSync(zipPath, 'r');
+  try {
+    const header = Buffer.allocUnsafe(30);
+    const bytesRead = fs.readSync(fd, header, 0, 30, entry.localHeaderOffset);
+    if (bytesRead < 30 || header.readUInt32LE(0) !== LFH_SIG) {
+      throw makeError('Invalid ZIP local file header', 400, 'INVALID_ZIP');
+    }
+    const nameLen = header.readUInt16LE(26);
+    const extraLen = header.readUInt16LE(28);
+    return entry.localHeaderOffset + 30 + nameLen + extraLen;
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+/**
+ * Streams a single ZIP entry to a destination file while strictly enforcing
+ * the decompressed byte limit (zip-bomb protection).
+ */
+function extractZipEntryToFile(zipPath, entry, destPath, maxBytes) {
+  if ((entry.flags & 0x01) !== 0) {
+    throw makeError('Encrypted ZIP archives are not supported', 400, 'ENCRYPTED_ZIP');
+  }
+  if (entry.compressionMethod !== 0 && entry.compressionMethod !== 8) {
+    throw makeError(`Unsupported ZIP compression method (${entry.compressionMethod})`, 400, 'UNSUPPORTED_ZIP_METHOD');
+  }
+  if (entry.uncompressedSize > maxBytes) {
+    throw makeError(
+      `Archive entry "${entry.path}" exceeds the ${Math.round(maxBytes / (1024 * 1024))} MiB limit`,
+      413,
+      'ZIP_ENTRY_TOO_LARGE',
+    );
+  }
+
+  const dataStart = getLocalEntryDataStart(zipPath, entry);
+  const dataEnd = dataStart + entry.compressedSize - 1;
+
+  if (entry.compressedSize === 0) {
+    fs.writeFileSync(destPath, Buffer.alloc(0));
+    return Promise.resolve({ bytes: 0 });
+  }
+
+  return new Promise((resolve, reject) => {
+    const readStream = fs.createReadStream(zipPath, { start: dataStart, end: dataEnd });
+    const writeStream = fs.createWriteStream(destPath);
+    const sourceStream = entry.compressionMethod === 8 ? readStream.pipe(zlib.createInflateRaw()) : readStream;
+
+    let written = 0;
+    let settled = false;
+
+    const fail = (err) => {
+      if (settled) return;
+      settled = true;
+      readStream.destroy();
+      if (sourceStream !== readStream) sourceStream.destroy();
+      writeStream.destroy();
+      try { fs.unlinkSync(destPath); } catch { /* ignore */ }
+      reject(err);
+    };
+
+    readStream.on('error', (err) => fail(makeError(`Failed to read ZIP stream: ${err.message}`, 400, 'INVALID_ZIP')));
+    if (sourceStream !== readStream) {
+      sourceStream.on('error', (err) => fail(makeError(`Failed to decompress ZIP entry: ${err.message}`, 400, 'INVALID_ZIP')));
+    }
+    writeStream.on('error', (err) => fail(err));
+
+    sourceStream.on('data', (chunk) => {
+      written += chunk.length;
+      if (written > maxBytes) {
+        fail(makeError(
+          `Decompressed file "${entry.path}" exceeds the ${Math.round(maxBytes / (1024 * 1024))} MiB limit (zip bomb guard)`,
+          413,
+          'ZIP_BOMB_GUARD',
+        ));
+        return;
+      }
+      if (!writeStream.write(chunk)) {
+        sourceStream.pause();
+        writeStream.once('drain', () => sourceStream.resume());
+      }
+    });
+
+    sourceStream.on('end', () => {
+      if (!settled) writeStream.end();
+    });
+
+    writeStream.on('finish', () => {
+      if (settled) return;
+      settled = true;
+      resolve({ bytes: written });
+    });
+  });
+}
+
+async function extractZipEntryToBuffer(zipPath, entry, maxBytes) {
+  const tempFile = `${zipPath}.${crypto.randomBytes(6).toString('hex')}.buf`;
+  try {
+    await extractZipEntryToFile(zipPath, entry, tempFile, maxBytes);
+    return fs.readFileSync(tempFile);
+  } finally {
+    try { fs.unlinkSync(tempFile); } catch { /* ignore */ }
+  }
+}
+
+function resolveRelativeArchivePath(baseDir, relPath) {
+  if (typeof relPath !== 'string' || !relPath.trim()) return null;
+  const cleaned = relPath.trim().replace(/\\/g, '/');
+  if (cleaned.startsWith('/') || /^[a-zA-Z]:/.test(cleaned) || cleaned.includes('\0')) {
+    throw makeError(`Unsafe path in project.json: ${relPath}`, 400, 'UNSAFE_WE_PROJECT_PATH');
+  }
+  const combined = baseDir ? `${baseDir}/${cleaned}` : cleaned;
+  const segments = [];
+  for (const seg of combined.split('/')) {
+    if (!seg || seg === '.') continue;
+    if (seg === '..') {
+      throw makeError(`Path traversal in project.json is not allowed: ${relPath}`, 400, 'UNSAFE_WE_PROJECT_PATH');
+    }
+    segments.push(seg);
+  }
+  return segments.join('/');
+}
+
+/**
+ * Inspects and extracts a Wallpaper Engine Video `.zip` package into temporary files.
+ * Caller is responsible for cleaning up `result.cleanup()`.
+ */
+async function extractWallpaperEngineVideoZip(zipPath, workDir, options = {}) {
+  const maxBytes = options.maxExtractBytes || DEFAULT_MAX_EXTRACT_BYTES;
+  const entries = readZipDirectory(zipPath);
+
+  // Locate project.json (either at root or one level deep inside a wrapper directory).
+  const projectEntries = entries
+    .filter((e) => {
+      const lower = e.path.toLowerCase();
+      return lower === 'project.json' || (lower.endsWith('/project.json') && e.path.split('/').length === 2);
+    })
+    .sort((a, b) => a.path.split('/').length - b.path.split('/').length);
+
+  if (projectEntries.length === 0) {
+    throw makeError(
+      'Missing project.json in ZIP archive. Export or zip a Wallpaper Engine wallpaper folder containing project.json.',
+      400,
+      'WE_MISSING_PROJECT_JSON',
+    );
+  }
+
+  const projectEntry = projectEntries[0];
+  const baseDir = projectEntry.path.includes('/') ? projectEntry.path.slice(0, projectEntry.path.lastIndexOf('/')) : '';
+
+  const projectBuf = await extractZipEntryToBuffer(zipPath, projectEntry, MAX_PROJECT_JSON_BYTES);
+  let project;
+  try {
+    // Strip optional UTF-8 BOM commonly written by Windows editors.
+    const text = projectBuf.toString('utf8').replace(/^\uFEFF/, '');
+    project = JSON.parse(text);
+  } catch {
+    throw makeError('project.json is not valid JSON', 400, 'WE_INVALID_PROJECT_JSON');
+  }
+
+  if (!project || typeof project !== 'object') {
+    throw makeError('project.json must be a JSON object', 400, 'WE_INVALID_PROJECT_JSON');
+  }
+
+  const rawType = typeof project.type === 'string' ? project.type.trim().toLowerCase() : '';
+  if (rawType !== 'video') {
+    const label = rawType || 'unknown';
+    throw makeError(
+      `Unsupported Wallpaper Engine type "${label}". Only Video (MP4/WebM) Wallpaper Engine packages are supported.`,
+      415,
+      'WE_UNSUPPORTED_TYPE',
+    );
+  }
+
+  const videoRelPath = resolveRelativeArchivePath(baseDir, project.file);
+  if (!videoRelPath) {
+    throw makeError('project.json is missing the "file" field pointing to the video file', 400, 'WE_MISSING_VIDEO_FILE');
+  }
+
+  const entryMap = new Map();
+  const entryMapLower = new Map();
+  for (const e of entries) {
+    entryMap.set(e.path, e);
+    entryMapLower.set(e.path.toLowerCase(), e);
+  }
+
+  const videoEntry = entryMap.get(videoRelPath) || entryMapLower.get(videoRelPath.toLowerCase());
+  if (!videoEntry) {
+    throw makeError(
+      `Video file "${project.file}" declared in project.json was not found inside the ZIP archive`,
+      400,
+      'WE_VIDEO_NOT_FOUND',
+    );
+  }
+
+  let previewEntry = null;
+  if (typeof project.preview === 'string' && project.preview.trim()) {
+    try {
+      const previewRelPath = resolveRelativeArchivePath(baseDir, project.preview);
+      if (previewRelPath) {
+        previewEntry = entryMap.get(previewRelPath) || entryMapLower.get(previewRelPath.toLowerCase()) || null;
+      }
+    } catch {
+      previewEntry = null;
+    }
+  }
+
+  const extractDir = path.join(workDir, `we-extract-${crypto.randomBytes(6).toString('hex')}`);
+  fs.mkdirSync(extractDir, { recursive: true });
+
+  const cleanup = () => {
+    try { fs.rmSync(extractDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  };
+
+  try {
+    const videoTempPath = path.join(extractDir, 'video.bin');
+    await extractZipEntryToFile(zipPath, videoEntry, videoTempPath, maxBytes);
+
+    let posterTempPath = null;
+    if (previewEntry && previewEntry.uncompressedSize <= MAX_POSTER_BYTES) {
+      const candidatePoster = path.join(extractDir, 'poster.bin');
+      try {
+        await extractZipEntryToFile(zipPath, previewEntry, candidatePoster, MAX_POSTER_BYTES);
+        posterTempPath = candidatePoster;
+      } catch {
+        posterTempPath = null;
+      }
+    }
+
+    const title = typeof project.title === 'string' && project.title.trim()
+      ? project.title.trim().slice(0, 80)
+      : path.basename(videoEntry.path);
+    const workshopId = project.workshopid !== undefined && project.workshopid !== null
+      ? String(project.workshopid).replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 32) || null
+      : null;
+    const tags = Array.isArray(project.tags)
+      ? project.tags.filter((t) => typeof t === 'string' && t.trim()).map((t) => t.trim().slice(0, 24)).slice(0, 8)
+      : [];
+
+    return {
+      title,
+      workshopId,
+      tags,
+      videoFileName: path.basename(videoEntry.path),
+      videoTempPath,
+      posterTempPath,
+      cleanup,
+    };
+  } catch (err) {
+    cleanup();
+    throw err;
+  }
+}
+
+module.exports = {
+  MAX_ZIP_ENTRIES,
+  DEFAULT_MAX_EXTRACT_BYTES,
+  normalizeZipEntryPath,
+  readZipDirectory,
+  extractWallpaperEngineVideoZip,
+};
+
   },
   './storage.cjs': (module, exports, require) => {
 'use strict';
@@ -95,7 +566,10 @@ const path = require('node:path');
 
 const SCHEMA_VERSION = 1;
 const GLASS_ENGINE_VERSION = 2;
-const MAX_UPLOAD_BYTES = 50 * 1024 * 1024; // 50 MiB
+const MAX_UPLOAD_BYTES = 256 * 1024 * 1024; // 256 MiB (supports 4K Wallpaper Engine MP4/WebM via chunked upload)
+const MAX_SINGLE_REQUEST_BYTES = 96 * 1024 * 1024; // 96 MiB single-request stream (inside ClaudeWeb 100 MiB proxy limit)
+const MAX_CHUNK_BYTES = 16 * 1024 * 1024; // 16 MiB max chunk
+const UPLOAD_SESSION_TTL_MS = 15 * 60 * 1000;
 const MAX_ITEMS = 64;
 const THEME_KEYS = ['warm', 'light', 'dark'];
 const VALID_SCOPES = new Set(['none', 'chat', 'workspace']);
@@ -103,7 +577,11 @@ const VALID_FITS = new Set(['cover', 'contain', 'center']);
 const VALID_SCRIM_MODES = new Set(['auto', 'light', 'dark']);
 const VALID_GLASS_TONES = new Set(['auto', 'light', 'dark']);
 const VALID_MEDIA_TYPES = new Set(['none', 'preset', 'image', 'video']);
+const VALID_UPLOAD_MODES = new Set(['media', 'poster', 'we-zip']);
 const ITEM_ID_PATTERN = /^[a-f0-9]{16,40}$/;
+const UPLOAD_ID_PATTERN = /^[a-f0-9]{16,40}$/;
+
+const { extractWallpaperEngineVideoZip } = require('./we-zip.cjs');
 
 const MIME_TO_EXT = {
   'image/png': '.png',
@@ -134,7 +612,7 @@ function detectSafeMediaMime(buf) {
   if (buf.subarray(4, 8).toString('ascii') === 'ftyp') {
     const brand = buf.subarray(8, 12).toString('ascii');
     if (brand === 'avif' || brand === 'avis') return 'image/avif';
-    if (['isom', 'iso2', 'mp41', 'mp42', 'avc1', 'M4V ', 'qt  ', 'dash', 'msnv'].includes(brand)) {
+    if (['isom', 'iso2', 'iso5', 'iso6', 'mp41', 'mp42', 'avc1', 'hev1', 'hvc1', 'av01', 'M4V ', 'qt  ', 'dash', 'msnv'].includes(brand)) {
       return 'video/mp4';
     }
   }
@@ -251,8 +729,82 @@ function createWallpaperStorage(options) {
   const configPath = path.join(dataDir, 'config.json');
   const catalogPath = path.join(dataDir, 'catalog.json');
   const mediaDir = path.join(dataDir, 'media');
+  const tmpUploadsDir = path.join(dataDir, 'tmp-uploads');
+  const uploadSessions = new Map();
 
   fs.mkdirSync(mediaDir, { recursive: true });
+  fs.mkdirSync(tmpUploadsDir, { recursive: true });
+
+  // Wipe any leftover temp files from a prior interrupted process on startup.
+  try {
+    for (const entry of fs.readdirSync(tmpUploadsDir)) {
+      try { fs.rmSync(path.join(tmpUploadsDir, entry), { recursive: true, force: true }); } catch { /* ignore */ }
+    }
+  } catch { /* ignore */ }
+
+  function moveFileSafe(src, dest) {
+    try {
+      fs.renameSync(src, dest);
+    } catch (err) {
+      if (err && err.code === 'EXDEV') {
+        fs.copyFileSync(src, dest);
+        fs.unlinkSync(src);
+      } else {
+        throw err;
+      }
+    }
+  }
+
+  function readFileHead(filePath, byteCount = 32) {
+    const fd = fs.openSync(filePath, 'r');
+    try {
+      const buf = Buffer.allocUnsafe(byteCount);
+      const read = fs.readSync(fd, buf, 0, byteCount, 0);
+      return buf.subarray(0, read);
+    } finally {
+      fs.closeSync(fd);
+    }
+  }
+
+  function hashFileSha256(filePath) {
+    return new Promise((resolve, reject) => {
+      const hash = crypto.createHash('sha256');
+      const stream = fs.createReadStream(filePath);
+      stream.on('data', (chunk) => hash.update(chunk));
+      stream.on('error', reject);
+      stream.on('end', () => resolve(hash.digest('hex')));
+    });
+  }
+
+  function sanitizeDisplayName(rawName, fallbackExt) {
+    const base = typeof rawName === 'string' ? rawName.trim() : '';
+    const safe = base.replace(/[\x00-\x1f\x7f<>:"/\\|?*]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 80);
+    return safe || `wallpaper${fallbackExt}`;
+  }
+
+  function sanitizeWorkshopId(raw) {
+    if (raw === undefined || raw === null) return null;
+    const s = String(raw).replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 32);
+    return s || null;
+  }
+
+  function sanitizeTags(raw) {
+    if (!Array.isArray(raw)) return [];
+    return raw
+      .filter((t) => typeof t === 'string' && t.trim())
+      .map((t) => t.trim().slice(0, 24))
+      .slice(0, 8);
+  }
+
+  function cleanupStaleUploads() {
+    const now = Date.now();
+    for (const [id, session] of uploadSessions.entries()) {
+      if (now - session.updatedAt > UPLOAD_SESSION_TTL_MS) {
+        uploadSessions.delete(id);
+        try { fs.unlinkSync(session.partPath); } catch { /* ignore */ }
+      }
+    }
+  }
 
   function readCatalog() {
     try {
@@ -358,20 +910,32 @@ function createWallpaperStorage(options) {
     return next;
   }
 
-  function storeUpload(buffer, meta = {}) {
-    if (!Buffer.isBuffer(buffer) || buffer.length === 0) {
+  async function storeMediaFile(tempFilePath, meta = {}) {
+    const stat = fs.statSync(tempFilePath);
+    if (!stat.isFile() || stat.size === 0) {
       const err = new Error('Uploaded file is empty');
       err.statusCode = 400;
       throw err;
     }
-    if (buffer.length > MAX_UPLOAD_BYTES) {
+    if (stat.size > MAX_UPLOAD_BYTES) {
       const err = new Error(`File exceeds the ${Math.round(MAX_UPLOAD_BYTES / (1024 * 1024))} MiB size limit`);
       err.statusCode = 413;
       throw err;
     }
-    const mimeType = detectSafeMediaMime(buffer);
+
+    const head = readFileHead(tempFilePath, 32);
+    const mimeType = detectSafeMediaMime(head);
     if (!mimeType) {
-      const err = new Error('Unsupported or unsafe file format. Supported: PNG, JPEG, WebP, AVIF, GIF, MP4, WebM.');
+      const err = new Error(
+        meta.requireVideo
+          ? 'Unsupported video container. Only browser-native MP4 and WebM videos are supported.'
+          : 'Unsupported or unsafe file format. Supported: PNG, JPEG, WebP, AVIF, GIF, MP4, WebM.',
+      );
+      err.statusCode = 415;
+      throw err;
+    }
+    if (meta.requireVideo && !mimeType.startsWith('video/')) {
+      const err = new Error('Wallpaper Engine Video package must reference a valid MP4 or WebM video file.');
       err.statusCode = 415;
       throw err;
     }
@@ -379,6 +943,9 @@ function createWallpaperStorage(options) {
     const items = readCatalog();
     const posterOf = typeof meta.posterOf === 'string' && ITEM_ID_PATTERN.test(meta.posterOf) ? meta.posterOf : null;
     const detectedTone = meta.tone === 'light' || meta.tone === 'dark' ? meta.tone : null;
+    const source = meta.source === 'wallpaper-engine' ? 'wallpaper-engine' : 'local';
+    const workshopId = sanitizeWorkshopId(meta.workshopId);
+    const tags = sanitizeTags(meta.tags);
 
     if (posterOf) {
       if (!mimeType.startsWith('image/')) {
@@ -395,7 +962,7 @@ function createWallpaperStorage(options) {
       const ext = MIME_TO_EXT[mimeType];
       const posterFileName = `${parent.id}-poster${ext}`;
       const posterPath = path.join(mediaDir, posterFileName);
-      fs.writeFileSync(posterPath, buffer);
+      moveFileSafe(tempFilePath, posterPath);
       parent.posterFileName = posterFileName;
       parent.posterMime = mimeType;
       if (detectedTone) parent.tone = detectedTone;
@@ -409,13 +976,35 @@ function createWallpaperStorage(options) {
       throw err;
     }
 
-    const sha256 = crypto.createHash('sha256').update(buffer).digest('hex');
+    const sha256 = await hashFileSha256(tempFilePath);
     const existing = items.find((item) => item.sha256 === sha256);
     if (existing) {
+      try { fs.unlinkSync(tempFilePath); } catch { /* ignore */ }
+      let changed = false;
       if (detectedTone && existing.tone !== detectedTone) {
         existing.tone = detectedTone;
-        saveCatalog(items);
+        changed = true;
       }
+      if (source === 'wallpaper-engine' && existing.source !== 'wallpaper-engine') {
+        existing.source = 'wallpaper-engine';
+        changed = true;
+      }
+      if (workshopId && !existing.workshopId) {
+        existing.workshopId = workshopId;
+        changed = true;
+      }
+      if (typeof meta.originalName === 'string' && meta.originalName.trim() && source === 'wallpaper-engine') {
+        const nextName = sanitizeDisplayName(meta.originalName, MIME_TO_EXT[mimeType]);
+        if (existing.name !== nextName) {
+          existing.name = nextName;
+          changed = true;
+        }
+      }
+      if (tags.length > 0 && (!Array.isArray(existing.tags) || existing.tags.length === 0)) {
+        existing.tags = tags;
+        changed = true;
+      }
+      if (changed) saveCatalog(items);
       return existing;
     }
 
@@ -423,35 +1012,231 @@ function createWallpaperStorage(options) {
     const ext = MIME_TO_EXT[mimeType];
     const fileName = `${id}${ext}`;
     const targetPath = path.join(mediaDir, fileName);
-    const tempPath = `${targetPath}.${crypto.randomBytes(4).toString('hex')}.tmp`;
-    try {
-      fs.writeFileSync(tempPath, buffer);
-      fs.renameSync(tempPath, targetPath);
-    } finally {
-      try { fs.unlinkSync(tempPath); } catch { /* ignore */ }
-    }
+    moveFileSafe(tempFilePath, targetPath);
 
-    const rawName = typeof meta.originalName === 'string' ? path.basename(meta.originalName).trim() : '';
-    const safeName = rawName.replace(/[\x00-\x1f\x7f<>:"/\\|?*]+/g, '').slice(0, 80) || `wallpaper${ext}`;
+    const safeName = sanitizeDisplayName(
+      source === 'wallpaper-engine' ? meta.originalName : path.basename(String(meta.originalName || '')),
+      ext,
+    );
 
     const item = {
       id,
       name: safeName,
       kind: mimeType.startsWith('video/') ? 'video' : 'image',
       mimeType,
-      bytes: buffer.length,
+      bytes: stat.size,
       sha256,
       fileName,
       posterFileName: null,
       posterMime: null,
       tone: detectedTone,
-      source: 'local',
+      source,
+      ...(workshopId ? { workshopId } : {}),
+      ...(tags.length > 0 ? { tags } : {}),
       createdAt: new Date().toISOString(),
     };
 
     items.unshift(item);
     saveCatalog(items);
     return item;
+  }
+
+  async function storeUpload(buffer, meta = {}) {
+    if (!Buffer.isBuffer(buffer) || buffer.length === 0) {
+      const err = new Error('Uploaded file is empty');
+      err.statusCode = 400;
+      throw err;
+    }
+    const tempPath = path.join(tmpUploadsDir, `single-${crypto.randomBytes(6).toString('hex')}.tmp`);
+    try {
+      fs.writeFileSync(tempPath, buffer);
+      return await storeMediaFile(tempPath, meta);
+    } finally {
+      try { fs.unlinkSync(tempPath); } catch { /* ignore */ }
+    }
+  }
+
+  async function importWallpaperEngineZipFile(zipFilePath, meta = {}) {
+    const extracted = await extractWallpaperEngineVideoZip(zipFilePath, tmpUploadsDir, {
+      maxExtractBytes: MAX_UPLOAD_BYTES,
+    });
+    try {
+      let item = await storeMediaFile(extracted.videoTempPath, {
+        originalName: extracted.title || extracted.videoFileName,
+        tone: meta.tone,
+        source: 'wallpaper-engine',
+        workshopId: extracted.workshopId,
+        tags: extracted.tags,
+        requireVideo: true,
+      });
+      if (extracted.posterTempPath && fs.existsSync(extracted.posterTempPath)) {
+        try {
+          item = await storeMediaFile(extracted.posterTempPath, {
+            posterOf: item.id,
+            tone: meta.tone,
+          });
+        } catch {
+          // Optional preview poster may be an unsupported format — keep imported video intact.
+        }
+      }
+      return item;
+    } finally {
+      extracted.cleanup();
+    }
+  }
+
+  function initChunkUpload(params = {}) {
+    cleanupStaleUploads();
+    const mode = VALID_UPLOAD_MODES.has(params.mode) ? params.mode : 'media';
+    const totalBytes = Number(params.totalBytes);
+    if (!Number.isFinite(totalBytes) || totalBytes <= 0) {
+      const err = new Error('totalBytes must be a positive number');
+      err.statusCode = 400;
+      throw err;
+    }
+    if (totalBytes > MAX_UPLOAD_BYTES) {
+      const err = new Error(`File exceeds the ${Math.round(MAX_UPLOAD_BYTES / (1024 * 1024))} MiB size limit`);
+      err.statusCode = 413;
+      throw err;
+    }
+    const uploadId = crypto.randomBytes(12).toString('hex');
+    const partPath = path.join(tmpUploadsDir, `chunk-${uploadId}.part`);
+    fs.writeFileSync(partPath, Buffer.alloc(0));
+
+    const session = {
+      uploadId,
+      mode,
+      totalBytes,
+      receivedBytes: 0,
+      partPath,
+      meta: {
+        originalName: typeof params.fileName === 'string' ? params.fileName : '',
+        posterOf: typeof params.posterOf === 'string' ? params.posterOf : undefined,
+        tone: params.tone === 'light' || params.tone === 'dark' ? params.tone : undefined,
+        source: params.source === 'wallpaper-engine' ? 'wallpaper-engine' : 'local',
+        workshopId: sanitizeWorkshopId(params.workshopId),
+        tags: sanitizeTags(params.tags),
+      },
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+    uploadSessions.set(uploadId, session);
+    return {
+      uploadId,
+      chunkSize: 8 * 1024 * 1024,
+      maxUploadBytes: MAX_UPLOAD_BYTES,
+    };
+  }
+
+  function getChunkSession(uploadId) {
+    cleanupStaleUploads();
+    if (!UPLOAD_ID_PATTERN.test(String(uploadId || ''))) {
+      const err = new Error('Invalid upload ID');
+      err.statusCode = 400;
+      throw err;
+    }
+    const session = uploadSessions.get(uploadId);
+    if (!session) {
+      const err = new Error('Upload session not found or expired');
+      err.statusCode = 404;
+      throw err;
+    }
+    return session;
+  }
+
+  function appendUploadChunk(uploadId, reqStream, expectedOffset) {
+    const session = getChunkSession(uploadId);
+    if (Number.isFinite(expectedOffset) && expectedOffset !== session.receivedBytes) {
+      const err = new Error(`Chunk offset mismatch (expected ${session.receivedBytes}, got ${expectedOffset})`);
+      err.statusCode = 409;
+      throw err;
+    }
+
+    return new Promise((resolve, reject) => {
+      const writeStream = fs.createWriteStream(session.partPath, { flags: 'a' });
+      let chunkBytes = 0;
+      let settled = false;
+
+      const fail = (err) => {
+        if (settled) return;
+        settled = true;
+        reqStream.resume();
+        writeStream.destroy();
+        reject(err);
+      };
+
+      reqStream.on('data', (chunk) => {
+        if (settled) return;
+        chunkBytes += chunk.length;
+        if (chunkBytes > MAX_CHUNK_BYTES) {
+          fail(Object.assign(new Error(`Chunk exceeds ${Math.round(MAX_CHUNK_BYTES / (1024 * 1024))} MiB limit`), { statusCode: 413 }));
+          return;
+        }
+        if (session.receivedBytes + chunkBytes > session.totalBytes || session.receivedBytes + chunkBytes > MAX_UPLOAD_BYTES) {
+          fail(Object.assign(new Error('Upload exceeded declared size limit'), { statusCode: 413 }));
+          return;
+        }
+        if (!writeStream.write(chunk)) {
+          reqStream.pause();
+          writeStream.once('drain', () => reqStream.resume());
+        }
+      });
+
+      reqStream.on('error', fail);
+      writeStream.on('error', fail);
+      reqStream.on('end', () => {
+        if (!settled) writeStream.end();
+      });
+      writeStream.on('finish', () => {
+        if (settled) return;
+        settled = true;
+        session.receivedBytes += chunkBytes;
+        session.updatedAt = Date.now();
+        resolve({
+          uploadId: session.uploadId,
+          receivedBytes: session.receivedBytes,
+          totalBytes: session.totalBytes,
+        });
+      });
+    });
+  }
+
+  async function completeChunkUpload(uploadId, overrideMeta = {}) {
+    const session = getChunkSession(uploadId);
+    uploadSessions.delete(uploadId);
+    try {
+      if (session.receivedBytes !== session.totalBytes) {
+        const err = new Error(`Incomplete upload (${session.receivedBytes}/${session.totalBytes} bytes received)`);
+        err.statusCode = 400;
+        throw err;
+      }
+      const mergedMeta = {
+        ...session.meta,
+        ...(overrideMeta.tone === 'light' || overrideMeta.tone === 'dark' ? { tone: overrideMeta.tone } : {}),
+      };
+      if (session.mode === 'we-zip') {
+        return await importWallpaperEngineZipFile(session.partPath, mergedMeta);
+      }
+      return await storeMediaFile(session.partPath, mergedMeta);
+    } finally {
+      try { fs.unlinkSync(session.partPath); } catch { /* ignore */ }
+    }
+  }
+
+  function abortChunkUpload(uploadId) {
+    if (!UPLOAD_ID_PATTERN.test(String(uploadId || ''))) return false;
+    const session = uploadSessions.get(uploadId);
+    if (!session) return false;
+    uploadSessions.delete(uploadId);
+    try { fs.unlinkSync(session.partPath); } catch { /* ignore */ }
+    return true;
+  }
+
+  function clearAllPendingUploads() {
+    for (const [id, session] of uploadSessions.entries()) {
+      uploadSessions.delete(id);
+      try { fs.unlinkSync(session.partPath); } catch { /* ignore */ }
+    }
   }
 
   function deleteItem(id) {
@@ -513,10 +1298,18 @@ function createWallpaperStorage(options) {
 
   return {
     dataDir,
+    tmpUploadsDir,
     readConfig,
     readCatalog,
     updateConfig,
     storeUpload,
+    storeMediaFile,
+    importWallpaperEngineZipFile,
+    initChunkUpload,
+    appendUploadChunk,
+    completeChunkUpload,
+    abortChunkUpload,
+    clearAllPendingUploads,
     deleteItem,
     resolveMediaFile,
     getStats,
@@ -526,6 +1319,7 @@ function createWallpaperStorage(options) {
 module.exports = {
   SCHEMA_VERSION,
   MAX_UPLOAD_BYTES,
+  MAX_SINGLE_REQUEST_BYTES,
   detectSafeMediaMime,
   defaultConfig,
   createWallpaperStorage,
@@ -644,12 +1438,13 @@ module.exports = { createWsBroadcaster };
   './index.cjs': (module, exports, require) => {
 'use strict';
 
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const http = require('node:http');
 const path = require('node:path');
 
 const presetsBundle = require('../shared/presets.json');
-const { MAX_UPLOAD_BYTES, createWallpaperStorage } = require('./storage.cjs');
+const { MAX_SINGLE_REQUEST_BYTES, createWallpaperStorage } = require('./storage.cjs');
 const { createWsBroadcaster } = require('./ws.cjs');
 
 function sendJson(res, status, data) {
@@ -690,6 +1485,48 @@ function readBodyBuffer(req, maxBytes) {
       if (settled) return;
       settled = true;
       reject(err);
+    });
+  });
+}
+
+function streamBodyToTempFile(req, tempPath, maxBytes) {
+  return new Promise((resolve, reject) => {
+    const writeStream = fs.createWriteStream(tempPath);
+    let total = 0;
+    let settled = false;
+
+    const fail = (err) => {
+      if (settled) return;
+      settled = true;
+      req.resume();
+      writeStream.destroy();
+      try { fs.unlinkSync(tempPath); } catch { /* ignore */ }
+      reject(err);
+    };
+
+    req.on('data', (chunk) => {
+      if (settled) return;
+      total += chunk.length;
+      if (total > maxBytes) {
+        const err = new Error(`Request payload exceeds ${Math.round(maxBytes / (1024 * 1024))} MiB limit`);
+        err.statusCode = 413;
+        fail(err);
+        return;
+      }
+      if (!writeStream.write(chunk)) {
+        req.pause();
+        writeStream.once('drain', () => req.resume());
+      }
+    });
+    req.on('end', () => {
+      if (!settled) writeStream.end();
+    });
+    req.on('error', fail);
+    writeStream.on('error', fail);
+    writeStream.on('finish', () => {
+      if (settled) return;
+      settled = true;
+      resolve(total);
     });
   });
 }
@@ -807,19 +1644,85 @@ function createWallpaperServer(options = {}) {
         return;
       }
 
-      if (method === 'POST' && pathname === '/wallpapers/upload') {
-        const buf = await readBodyBuffer(req, MAX_UPLOAD_BYTES);
-        const rawHeaderName = req.headers['x-file-name'];
-        let originalName = '';
-        if (typeof rawHeaderName === 'string' && rawHeaderName) {
-          try { originalName = decodeURIComponent(rawHeaderName); } catch { originalName = rawHeaderName; }
-        }
-        const posterOf = parsedUrl.searchParams.get('posterOf') || undefined;
-        const rawTone = typeof req.headers['x-media-tone'] === 'string' ? req.headers['x-media-tone'].trim().toLowerCase() : '';
-        const tone = rawTone === 'light' || rawTone === 'dark' ? rawTone : undefined;
-        const item = storage.storeUpload(buf, { originalName, posterOf, tone });
+      if (method === 'POST' && pathname === '/wallpapers/upload/init') {
+        const raw = await readBodyBuffer(req, 256 * 1024);
+        const body = raw.length ? JSON.parse(raw.toString('utf8')) : {};
+        const session = storage.initChunkUpload(body);
+        sendJson(res, 201, session);
+        return;
+      }
+
+      const chunkMatch = pathname.match(/^\/wallpapers\/upload\/([a-f0-9]{16,40})\/chunk$/);
+      if (method === 'PUT' && chunkMatch) {
+        const offsetParam = parsedUrl.searchParams.get('offset');
+        const expectedOffset = offsetParam !== null ? Number.parseInt(offsetParam, 10) : NaN;
+        const progress = await storage.appendUploadChunk(chunkMatch[1], req, expectedOffset);
+        sendJson(res, 200, progress);
+        return;
+      }
+
+      const completeMatch = pathname.match(/^\/wallpapers\/upload\/([a-f0-9]{16,40})\/complete$/);
+      if (method === 'POST' && completeMatch) {
+        const raw = await readBodyBuffer(req, 64 * 1024);
+        const body = raw.length ? JSON.parse(raw.toString('utf8')) : {};
+        const item = await storage.completeChunkUpload(completeMatch[1], body);
         ws.broadcast({ type: 'catalog_updated', itemId: item.id });
         sendJson(res, 201, { item, items: storage.readCatalog(), stats: storage.getStats() });
+        return;
+      }
+
+      const abortMatch = pathname.match(/^\/wallpapers\/upload\/([a-f0-9]{16,40})$/);
+      if (method === 'DELETE' && abortMatch) {
+        storage.abortChunkUpload(abortMatch[1]);
+        sendJson(res, 200, { aborted: true });
+        return;
+      }
+
+      if (method === 'POST' && pathname === '/wallpapers/upload') {
+        const tempPath = path.join(storage.tmpUploadsDir, `upload-${crypto.randomBytes(6).toString('hex')}.tmp`);
+        try {
+          await streamBodyToTempFile(req, tempPath, MAX_SINGLE_REQUEST_BYTES);
+          const queryName = parsedUrl.searchParams.get('name');
+          const rawHeaderName = req.headers['x-file-name'];
+          let originalName = '';
+          if (typeof queryName === 'string' && queryName) {
+            originalName = queryName;
+          } else if (typeof rawHeaderName === 'string' && rawHeaderName) {
+            try { originalName = decodeURIComponent(rawHeaderName); } catch { originalName = rawHeaderName; }
+          }
+          const posterOf = parsedUrl.searchParams.get('posterOf') || undefined;
+          const queryTone = parsedUrl.searchParams.get('tone');
+          const rawTone = typeof queryTone === 'string' && queryTone
+            ? queryTone.trim().toLowerCase()
+            : typeof req.headers['x-media-tone'] === 'string'
+              ? req.headers['x-media-tone'].trim().toLowerCase()
+              : '';
+          const tone = rawTone === 'light' || rawTone === 'dark' ? rawTone : undefined;
+          const source = parsedUrl.searchParams.get('source') === 'wallpaper-engine' ? 'wallpaper-engine' : 'local';
+          const workshopId = parsedUrl.searchParams.get('workshopId') || undefined;
+          const rawTags = parsedUrl.searchParams.get('tags');
+          const tags = rawTags ? rawTags.split(',').map((t) => t.trim()).filter(Boolean) : undefined;
+          const item = await storage.storeMediaFile(tempPath, { originalName, posterOf, tone, source, workshopId, tags });
+          ws.broadcast({ type: 'catalog_updated', itemId: item.id });
+          sendJson(res, 201, { item, items: storage.readCatalog(), stats: storage.getStats() });
+        } finally {
+          try { fs.unlinkSync(tempPath); } catch { /* ignore */ }
+        }
+        return;
+      }
+
+      if (method === 'POST' && pathname === '/sources/wallpaper-engine/import-zip') {
+        const tempPath = path.join(storage.tmpUploadsDir, `we-zip-${crypto.randomBytes(6).toString('hex')}.zip`);
+        try {
+          await streamBodyToTempFile(req, tempPath, MAX_SINGLE_REQUEST_BYTES);
+          const rawTone = (parsedUrl.searchParams.get('tone') || '').trim().toLowerCase();
+          const tone = rawTone === 'light' || rawTone === 'dark' ? rawTone : undefined;
+          const item = await storage.importWallpaperEngineZipFile(tempPath, { tone });
+          ws.broadcast({ type: 'catalog_updated', itemId: item.id });
+          sendJson(res, 201, { item, items: storage.readCatalog(), stats: storage.getStats() });
+        } finally {
+          try { fs.unlinkSync(tempPath); } catch { /* ignore */ }
+        }
         return;
       }
 
@@ -871,6 +1774,7 @@ function createWallpaperServer(options = {}) {
     server,
     storage,
     close() {
+      storage.clearAllPendingUploads();
       ws.closeAll();
       server.closeAllConnections?.();
       return new Promise((resolve) => server.close(() => resolve()));

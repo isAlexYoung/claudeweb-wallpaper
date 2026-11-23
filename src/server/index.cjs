@@ -1,11 +1,12 @@
 'use strict';
 
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const http = require('node:http');
 const path = require('node:path');
 
 const presetsBundle = require('../shared/presets.json');
-const { MAX_UPLOAD_BYTES, createWallpaperStorage } = require('./storage.cjs');
+const { MAX_SINGLE_REQUEST_BYTES, createWallpaperStorage } = require('./storage.cjs');
 const { createWsBroadcaster } = require('./ws.cjs');
 
 function sendJson(res, status, data) {
@@ -46,6 +47,48 @@ function readBodyBuffer(req, maxBytes) {
       if (settled) return;
       settled = true;
       reject(err);
+    });
+  });
+}
+
+function streamBodyToTempFile(req, tempPath, maxBytes) {
+  return new Promise((resolve, reject) => {
+    const writeStream = fs.createWriteStream(tempPath);
+    let total = 0;
+    let settled = false;
+
+    const fail = (err) => {
+      if (settled) return;
+      settled = true;
+      req.resume();
+      writeStream.destroy();
+      try { fs.unlinkSync(tempPath); } catch { /* ignore */ }
+      reject(err);
+    };
+
+    req.on('data', (chunk) => {
+      if (settled) return;
+      total += chunk.length;
+      if (total > maxBytes) {
+        const err = new Error(`Request payload exceeds ${Math.round(maxBytes / (1024 * 1024))} MiB limit`);
+        err.statusCode = 413;
+        fail(err);
+        return;
+      }
+      if (!writeStream.write(chunk)) {
+        req.pause();
+        writeStream.once('drain', () => req.resume());
+      }
+    });
+    req.on('end', () => {
+      if (!settled) writeStream.end();
+    });
+    req.on('error', fail);
+    writeStream.on('error', fail);
+    writeStream.on('finish', () => {
+      if (settled) return;
+      settled = true;
+      resolve(total);
     });
   });
 }
@@ -163,19 +206,85 @@ function createWallpaperServer(options = {}) {
         return;
       }
 
-      if (method === 'POST' && pathname === '/wallpapers/upload') {
-        const buf = await readBodyBuffer(req, MAX_UPLOAD_BYTES);
-        const rawHeaderName = req.headers['x-file-name'];
-        let originalName = '';
-        if (typeof rawHeaderName === 'string' && rawHeaderName) {
-          try { originalName = decodeURIComponent(rawHeaderName); } catch { originalName = rawHeaderName; }
-        }
-        const posterOf = parsedUrl.searchParams.get('posterOf') || undefined;
-        const rawTone = typeof req.headers['x-media-tone'] === 'string' ? req.headers['x-media-tone'].trim().toLowerCase() : '';
-        const tone = rawTone === 'light' || rawTone === 'dark' ? rawTone : undefined;
-        const item = storage.storeUpload(buf, { originalName, posterOf, tone });
+      if (method === 'POST' && pathname === '/wallpapers/upload/init') {
+        const raw = await readBodyBuffer(req, 256 * 1024);
+        const body = raw.length ? JSON.parse(raw.toString('utf8')) : {};
+        const session = storage.initChunkUpload(body);
+        sendJson(res, 201, session);
+        return;
+      }
+
+      const chunkMatch = pathname.match(/^\/wallpapers\/upload\/([a-f0-9]{16,40})\/chunk$/);
+      if (method === 'PUT' && chunkMatch) {
+        const offsetParam = parsedUrl.searchParams.get('offset');
+        const expectedOffset = offsetParam !== null ? Number.parseInt(offsetParam, 10) : NaN;
+        const progress = await storage.appendUploadChunk(chunkMatch[1], req, expectedOffset);
+        sendJson(res, 200, progress);
+        return;
+      }
+
+      const completeMatch = pathname.match(/^\/wallpapers\/upload\/([a-f0-9]{16,40})\/complete$/);
+      if (method === 'POST' && completeMatch) {
+        const raw = await readBodyBuffer(req, 64 * 1024);
+        const body = raw.length ? JSON.parse(raw.toString('utf8')) : {};
+        const item = await storage.completeChunkUpload(completeMatch[1], body);
         ws.broadcast({ type: 'catalog_updated', itemId: item.id });
         sendJson(res, 201, { item, items: storage.readCatalog(), stats: storage.getStats() });
+        return;
+      }
+
+      const abortMatch = pathname.match(/^\/wallpapers\/upload\/([a-f0-9]{16,40})$/);
+      if (method === 'DELETE' && abortMatch) {
+        storage.abortChunkUpload(abortMatch[1]);
+        sendJson(res, 200, { aborted: true });
+        return;
+      }
+
+      if (method === 'POST' && pathname === '/wallpapers/upload') {
+        const tempPath = path.join(storage.tmpUploadsDir, `upload-${crypto.randomBytes(6).toString('hex')}.tmp`);
+        try {
+          await streamBodyToTempFile(req, tempPath, MAX_SINGLE_REQUEST_BYTES);
+          const queryName = parsedUrl.searchParams.get('name');
+          const rawHeaderName = req.headers['x-file-name'];
+          let originalName = '';
+          if (typeof queryName === 'string' && queryName) {
+            originalName = queryName;
+          } else if (typeof rawHeaderName === 'string' && rawHeaderName) {
+            try { originalName = decodeURIComponent(rawHeaderName); } catch { originalName = rawHeaderName; }
+          }
+          const posterOf = parsedUrl.searchParams.get('posterOf') || undefined;
+          const queryTone = parsedUrl.searchParams.get('tone');
+          const rawTone = typeof queryTone === 'string' && queryTone
+            ? queryTone.trim().toLowerCase()
+            : typeof req.headers['x-media-tone'] === 'string'
+              ? req.headers['x-media-tone'].trim().toLowerCase()
+              : '';
+          const tone = rawTone === 'light' || rawTone === 'dark' ? rawTone : undefined;
+          const source = parsedUrl.searchParams.get('source') === 'wallpaper-engine' ? 'wallpaper-engine' : 'local';
+          const workshopId = parsedUrl.searchParams.get('workshopId') || undefined;
+          const rawTags = parsedUrl.searchParams.get('tags');
+          const tags = rawTags ? rawTags.split(',').map((t) => t.trim()).filter(Boolean) : undefined;
+          const item = await storage.storeMediaFile(tempPath, { originalName, posterOf, tone, source, workshopId, tags });
+          ws.broadcast({ type: 'catalog_updated', itemId: item.id });
+          sendJson(res, 201, { item, items: storage.readCatalog(), stats: storage.getStats() });
+        } finally {
+          try { fs.unlinkSync(tempPath); } catch { /* ignore */ }
+        }
+        return;
+      }
+
+      if (method === 'POST' && pathname === '/sources/wallpaper-engine/import-zip') {
+        const tempPath = path.join(storage.tmpUploadsDir, `we-zip-${crypto.randomBytes(6).toString('hex')}.zip`);
+        try {
+          await streamBodyToTempFile(req, tempPath, MAX_SINGLE_REQUEST_BYTES);
+          const rawTone = (parsedUrl.searchParams.get('tone') || '').trim().toLowerCase();
+          const tone = rawTone === 'light' || rawTone === 'dark' ? rawTone : undefined;
+          const item = await storage.importWallpaperEngineZipFile(tempPath, { tone });
+          ws.broadcast({ type: 'catalog_updated', itemId: item.id });
+          sendJson(res, 201, { item, items: storage.readCatalog(), stats: storage.getStats() });
+        } finally {
+          try { fs.unlinkSync(tempPath); } catch { /* ignore */ }
+        }
         return;
       }
 
@@ -227,6 +336,7 @@ function createWallpaperServer(options = {}) {
     server,
     storage,
     close() {
+      storage.clearAllPendingUploads();
       ws.closeAll();
       server.closeAllConnections?.();
       return new Promise((resolve) => server.close(() => resolve()));

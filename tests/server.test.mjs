@@ -3,10 +3,66 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import zlib from 'node:zlib';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
 const { createWallpaperServer } = require('../dist/server.cjs');
+
+/** Minimal pure-Node ZIP builder for testing STORE/DEFLATE, symlinks, and traversal payloads. */
+function buildTestZip(entries) {
+  const localChunks = [];
+  const cdChunks = [];
+  let offset = 0;
+
+  for (const entry of entries) {
+    const nameBuf = Buffer.from(entry.name, 'utf8');
+    const rawBuf = Buffer.isBuffer(entry.data) ? entry.data : Buffer.from(entry.data, 'utf8');
+    const method = entry.deflate ? 8 : 0;
+    const compBuf = method === 8 ? zlib.deflateRawSync(rawBuf) : rawBuf;
+
+    const lfh = Buffer.alloc(30);
+    lfh.writeUInt32LE(0x04034b50, 0);
+    lfh.writeUInt16LE(20, 4);
+    lfh.writeUInt16LE(0, 6);
+    lfh.writeUInt16LE(method, 8);
+    lfh.writeUInt32LE(0, 14); // crc32 ignored by reader
+    lfh.writeUInt32LE(compBuf.length, 18);
+    lfh.writeUInt32LE(rawBuf.length, 22);
+    lfh.writeUInt16LE(nameBuf.length, 26);
+    lfh.writeUInt16LE(0, 28);
+
+    const cdh = Buffer.alloc(46);
+    cdh.writeUInt32LE(0x02014b50, 0);
+    cdh.writeUInt16LE(entry.symlink ? (3 << 8) | 20 : 20, 4);
+    cdh.writeUInt16LE(20, 6);
+    cdh.writeUInt16LE(0, 8);
+    cdh.writeUInt16LE(method, 10);
+    cdh.writeUInt32LE(0, 16);
+    cdh.writeUInt32LE(compBuf.length, 20);
+    cdh.writeUInt32LE(rawBuf.length, 24);
+    cdh.writeUInt16LE(nameBuf.length, 28);
+    cdh.writeUInt16LE(0, 30);
+    cdh.writeUInt16LE(0, 32);
+    cdh.writeUInt32LE(entry.symlink ? ((0o120777 << 16) >>> 0) : 0, 38);
+    cdh.writeUInt32LE(offset, 42);
+
+    localChunks.push(lfh, nameBuf, compBuf);
+    cdChunks.push(cdh, nameBuf);
+    offset += lfh.length + nameBuf.length + compBuf.length;
+  }
+
+  const cdBuf = Buffer.concat(cdChunks);
+  const eocd = Buffer.alloc(22);
+  eocd.writeUInt32LE(0x06054b50, 0);
+  eocd.writeUInt16LE(entries.length, 8);
+  eocd.writeUInt16LE(entries.length, 10);
+  eocd.writeUInt32LE(cdBuf.length, 12);
+  eocd.writeUInt32LE(offset, 16);
+  eocd.writeUInt16LE(0, 20);
+
+  return Buffer.concat([...localChunks, cdBuf, eocd]);
+}
 
 const PNG_SAMPLE = Buffer.from([
   0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
@@ -220,5 +276,213 @@ test('migrates v1.0.0 untouched opaque defaults (0.84/16) to v1.1.0 translucent 
     }
   } finally {
     fs.rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('supports chunked streaming uploads, query-param metadata, offset checks, and abort cleanup', async () => {
+  const srv = await startTempServer();
+  try {
+    const bigMp4 = Buffer.concat([MP4_SAMPLE, Buffer.alloc(1024, 0x42)]);
+
+    // 1. Query-param upload (matching ClaudeWeb RPC proxy which forwards query string)
+    const qRes = await fetch(
+      `${srv.baseUrl}/wallpapers/upload?name=${encodeURIComponent('Neon Drift')}&tone=dark&source=wallpaper-engine&workshopId=2987654321`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'video/mp4' },
+        body: MP4_SAMPLE,
+      },
+    );
+    assert.equal(qRes.status, 201);
+    const qData = await qRes.json();
+    assert.equal(qData.item.name, 'Neon Drift');
+    assert.equal(qData.item.tone, 'dark');
+    assert.equal(qData.item.source, 'wallpaper-engine');
+    assert.equal(qData.item.workshopId, '2987654321');
+
+    // 2. Multi-chunk upload init -> chunk 1 -> bad offset 409 -> chunk 2 -> complete
+    const initRes = await fetch(`${srv.baseUrl}/wallpapers/upload/init`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        mode: 'media',
+        fileName: '4K Skyline',
+        totalBytes: bigMp4.length,
+        tone: 'dark',
+        source: 'wallpaper-engine',
+        workshopId: '1122334455',
+      }),
+    });
+    assert.equal(initRes.status, 201);
+    const { uploadId } = await initRes.json();
+
+    const mid = Math.floor(bigMp4.length / 2);
+    const c1 = await fetch(`${srv.baseUrl}/wallpapers/upload/${uploadId}/chunk?offset=0`, {
+      method: 'PUT',
+      body: bigMp4.subarray(0, mid),
+    });
+    assert.equal(c1.status, 200);
+
+    const badOffset = await fetch(`${srv.baseUrl}/wallpapers/upload/${uploadId}/chunk?offset=0`, {
+      method: 'PUT',
+      body: bigMp4.subarray(mid),
+    });
+    assert.equal(badOffset.status, 409);
+
+    const c2 = await fetch(`${srv.baseUrl}/wallpapers/upload/${uploadId}/chunk?offset=${mid}`, {
+      method: 'PUT',
+      body: bigMp4.subarray(mid),
+    });
+    assert.equal(c2.status, 200);
+
+    const doneRes = await fetch(`${srv.baseUrl}/wallpapers/upload/${uploadId}/complete`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    assert.equal(doneRes.status, 201);
+    const doneData = await doneRes.json();
+    assert.equal(doneData.item.name, '4K Skyline');
+    assert.equal(doneData.item.bytes, bigMp4.length);
+    assert.equal(doneData.item.source, 'wallpaper-engine');
+
+    // 3. Aborted upload deletes its temporary .part file cleanly
+    const abortInit = await fetch(`${srv.baseUrl}/wallpapers/upload/init`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode: 'media', fileName: 'cancelled.mp4', totalBytes: 100 }),
+    });
+    const { uploadId: cancelId } = await abortInit.json();
+    const delRes = await fetch(`${srv.baseUrl}/wallpapers/upload/${cancelId}`, { method: 'DELETE' });
+    assert.equal(delRes.status, 200);
+    const tmpFiles = fs.readdirSync(path.join(srv.dataDir, 'tmp-uploads'));
+    assert.equal(tmpFiles.length, 0);
+  } finally {
+    await srv.stop();
+  }
+});
+
+test('imports Wallpaper Engine Video .zip packages securely and rejects scene/web/traversal/symlink/invalid containers', async () => {
+  const srv = await startTempServer();
+  try {
+    // Valid WE Video zip (wrapped in a workshop ID folder, deflated project.json + stored MP4 + preview PNG)
+    const validZip = buildTestZip([
+      {
+        name: '2849123456/project.json',
+        deflate: true,
+        data: JSON.stringify({
+          title: 'Crimson Roadster 4K',
+          type: 'Video',
+          file: 'videos\\roadster.mp4',
+          preview: 'preview.png',
+          workshopid: '2849123456',
+          tags: ['Car', 'Dark'],
+        }),
+      },
+      {
+        name: '2849123456/videos/roadster.mp4',
+        deflate: false,
+        data: MP4_SAMPLE,
+      },
+      {
+        name: '2849123456/preview.png',
+        deflate: true,
+        data: PNG_SAMPLE,
+      },
+    ]);
+
+    // Upload via chunked we-zip flow
+    const initRes = await fetch(`${srv.baseUrl}/wallpapers/upload/init`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode: 'we-zip', fileName: 'roadster.zip', totalBytes: validZip.length }),
+    });
+    assert.equal(initRes.status, 201);
+    const { uploadId } = await initRes.json();
+
+    const putChunk = await fetch(`${srv.baseUrl}/wallpapers/upload/${uploadId}/chunk?offset=0`, {
+      method: 'PUT',
+      body: validZip,
+    });
+    assert.equal(putChunk.status, 200);
+
+    const compRes = await fetch(`${srv.baseUrl}/wallpapers/upload/${uploadId}/complete`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    assert.equal(compRes.status, 201);
+    const compData = await compRes.json();
+    assert.equal(compData.item.name, 'Crimson Roadster 4K');
+    assert.equal(compData.item.source, 'wallpaper-engine');
+    assert.equal(compData.item.workshopId, '2849123456');
+    assert.equal(compData.item.kind, 'video');
+    assert.ok(compData.item.posterFileName, 'preview.png should be attached as poster');
+    assert.deepEqual(compData.item.tags, ['Car', 'Dark']);
+
+    // Rejects Scene package with 415 WE_UNSUPPORTED_TYPE
+    const sceneZip = buildTestZip([
+      { name: 'project.json', data: JSON.stringify({ title: 'My Scene', type: 'scene', file: 'scene.json' }) },
+      { name: 'scene.json', data: '{}' },
+    ]);
+    const sceneRes = await fetch(`${srv.baseUrl}/sources/wallpaper-engine/import-zip`, {
+      method: 'POST',
+      body: sceneZip,
+    });
+    assert.equal(sceneRes.status, 415);
+    assert.equal((await sceneRes.json()).code, 'WE_UNSUPPORTED_TYPE');
+
+    // Rejects Web package with 415 WE_UNSUPPORTED_TYPE
+    const webZip = buildTestZip([
+      { name: 'project.json', data: JSON.stringify({ title: 'Web Clock', type: 'web', file: 'index.html' }) },
+      { name: 'index.html', data: '<html></html>' },
+    ]);
+    const webRes = await fetch(`${srv.baseUrl}/sources/wallpaper-engine/import-zip`, {
+      method: 'POST',
+      body: webZip,
+    });
+    assert.equal(webRes.status, 415);
+    assert.equal((await webRes.json()).code, 'WE_UNSUPPORTED_TYPE');
+
+    // Rejects path traversal inside ZIP
+    const traversalZip = buildTestZip([
+      { name: '../escape.mp4', data: MP4_SAMPLE },
+      { name: 'project.json', data: JSON.stringify({ title: 'Evil', type: 'video', file: '../escape.mp4' }) },
+    ]);
+    const travRes = await fetch(`${srv.baseUrl}/sources/wallpaper-engine/import-zip`, {
+      method: 'POST',
+      body: traversalZip,
+    });
+    assert.equal(travRes.status, 400);
+    assert.equal((await travRes.json()).code, 'UNSAFE_ZIP_PATH');
+
+    // Rejects Unix symlink inside ZIP
+    const symlinkZip = buildTestZip([
+      { name: 'project.json', data: JSON.stringify({ title: 'Sym', type: 'video', file: 'link.mp4' }) },
+      { name: 'link.mp4', data: '/etc/passwd', symlink: true },
+    ]);
+    const symRes = await fetch(`${srv.baseUrl}/sources/wallpaper-engine/import-zip`, {
+      method: 'POST',
+      body: symlinkZip,
+    });
+    assert.equal(symRes.status, 400);
+    assert.equal((await symRes.json()).code, 'UNSAFE_ZIP_SYMLINK');
+
+    // Rejects unsupported video container (fake MKV/text)
+    const fakeMkvZip = buildTestZip([
+      { name: 'project.json', data: JSON.stringify({ title: 'Bad Codec', type: 'video', file: 'movie.mkv' }) },
+      { name: 'movie.mkv', data: 'not a real mp4 or webm container payload' },
+    ]);
+    const mkvRes = await fetch(`${srv.baseUrl}/sources/wallpaper-engine/import-zip`, {
+      method: 'POST',
+      body: fakeMkvZip,
+    });
+    assert.equal(mkvRes.status, 415);
+
+    // Ensure no leftover temporary extraction directories or zip parts remain
+    const leftover = fs.readdirSync(path.join(srv.dataDir, 'tmp-uploads'));
+    assert.equal(leftover.length, 0);
+  } finally {
+    await srv.stop();
   }
 });

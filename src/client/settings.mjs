@@ -51,6 +51,19 @@ const PANEL_CSS = `
 .cwwp-footer { flex-shrink:0; border-top:1px solid hsl(var(--border)); padding:12px 16px; display:flex; flex-direction:column; gap:8px; background:hsl(var(--background)); }
 .cwwp-footer-row { display:flex; align-items:center; justify-content:space-between; gap:8px; }
 .cwwp-dirty-pill { font-size:11px; color:#d97706; font-weight:500; }
+.cwwp-progress-wrap { display:flex; flex-direction:column; gap:5px; padding:8px 10px; border-radius:8px; border:1px solid hsl(var(--border)); background:hsl(var(--muted) / 0.35); }
+.cwwp-progress-text { font-size:11.5px; color:hsl(var(--foreground)); font-variant-numeric:tabular-nums; }
+.cwwp-progress-track { height:5px; width:100%; border-radius:999px; background:hsl(var(--border)); overflow:hidden; }
+.cwwp-progress-bar { height:100%; background:hsl(var(--primary)); border-radius:inherit; transition:width 120ms ease; }
+.cwwp-we-actions { display:flex; flex-wrap:wrap; gap:8px; }
+.cwwp-we-list { display:flex; flex-direction:column; gap:8px; max-height:240px; overflow-y:auto; padding-right:2px; }
+.cwwp-we-row { display:flex; align-items:center; gap:10px; padding:6px; border:1px solid hsl(var(--border)); border-radius:8px; background:hsl(var(--background)); }
+.cwwp-we-thumb { width:58px; height:38px; border-radius:6px; overflow:hidden; flex-shrink:0; background:hsl(var(--muted)); display:grid; place-items:center; font-size:10px; color:hsl(var(--muted-foreground)); }
+.cwwp-we-thumb img { width:100%; height:100%; object-fit:cover; display:block; }
+.cwwp-we-info { min-width:0; flex:1; display:flex; flex-direction:column; gap:2px; }
+.cwwp-we-name { font-size:12px; font-weight:500; color:hsl(var(--foreground)); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.cwwp-we-sub { font-size:11px; color:hsl(var(--muted-foreground)); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.cwwp-badge-we { background:rgba(37,99,235,0.82); }
 `;
 
 function formatBytes(bytes) {
@@ -150,6 +163,134 @@ function captureVideoPosterBlob(file) {
   });
 }
 
+async function sniffBrowserVideoMime(file) {
+  try {
+    const head = new Uint8Array(await file.slice(0, 16).arrayBuffer());
+    if (head.length < 12) return null;
+    if (head[0] === 0x1a && head[1] === 0x45 && head[2] === 0xdf && head[3] === 0xa3) {
+      return 'video/webm';
+    }
+    const ftyp = String.fromCharCode(head[4], head[5], head[6], head[7]);
+    if (ftyp === 'ftyp') {
+      const brand = String.fromCharCode(head[8], head[9], head[10], head[11]);
+      if (brand !== 'avif' && brand !== 'avis') {
+        return 'video/mp4';
+      }
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function normalizeRelPath(p) {
+  return String(p || '').replace(/\\/g, '/').replace(/^\/+/, '');
+}
+
+async function scanWallpaperEngineFolderFiles(fileList) {
+  const files = Array.from(fileList || []);
+  const folderMap = new Map();
+  const projectJsonDirs = [];
+
+  for (const file of files) {
+    const rel = normalizeRelPath(file.webkitRelativePath || file.name);
+    const parts = rel.split('/');
+    const baseName = parts[parts.length - 1] || '';
+    const dir = parts.slice(0, -1).join('/');
+    if (!folderMap.has(dir)) folderMap.set(dir, []);
+    folderMap.get(dir).push({ file, rel, baseName });
+    if (baseName.toLowerCase() === 'project.json') {
+      projectJsonDirs.push({ dir, file });
+    }
+  }
+
+  const candidates = [];
+  const skippedByType = {};
+  const unsupportedContainers = [];
+
+  // Map every file by full normalized path (exact & lower) for nested relative lookups inside each workshop folder.
+  const allByRelLower = new Map();
+  for (const file of files) {
+    allByRelLower.set(normalizeRelPath(file.webkitRelativePath || file.name).toLowerCase(), file);
+  }
+
+  for (const projEntry of projectJsonDirs) {
+    let project;
+    try {
+      const rawText = (await projEntry.file.text()).replace(/^\uFEFF/, '');
+      project = JSON.parse(rawText);
+    } catch {
+      continue;
+    }
+    if (!project || typeof project !== 'object') continue;
+
+    const rawType = typeof project.type === 'string' ? project.type.trim().toLowerCase() : 'unknown';
+    const dirSegments = projEntry.dir.split('/').filter(Boolean);
+    const folderName = dirSegments[dirSegments.length - 1] || '';
+    const title = typeof project.title === 'string' && project.title.trim()
+      ? project.title.trim().slice(0, 80)
+      : folderName || 'Wallpaper';
+
+    if (rawType !== 'video') {
+      skippedByType[rawType] = (skippedByType[rawType] || 0) + 1;
+      if (projectJsonDirs.length === 1) {
+        candidates.push({ rejected: 'type', type: rawType, title });
+      }
+      continue;
+    }
+
+    const declaredFile = typeof project.file === 'string' ? normalizeRelPath(project.file.trim()) : '';
+    if (!declaredFile) continue;
+    const videoRel = projEntry.dir ? `${projEntry.dir}/${declaredFile}` : declaredFile;
+    const videoFile = allByRelLower.get(videoRel.toLowerCase());
+    if (!videoFile) continue;
+
+    const sniffedMime = await sniffBrowserVideoMime(videoFile);
+    if (!sniffedMime) {
+      unsupportedContainers.push({ title, file: declaredFile });
+      if (projectJsonDirs.length === 1) {
+        candidates.push({ rejected: 'container', file: declaredFile, title });
+      }
+      continue;
+    }
+
+    let previewFile = null;
+    if (typeof project.preview === 'string' && project.preview.trim()) {
+      const previewRel = projEntry.dir
+        ? `${projEntry.dir}/${normalizeRelPath(project.preview.trim())}`
+        : normalizeRelPath(project.preview.trim());
+      previewFile = allByRelLower.get(previewRel.toLowerCase()) || null;
+    }
+
+    const workshopId = project.workshopid !== undefined && project.workshopid !== null
+      ? String(project.workshopid).replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 32)
+      : (/^\d{6,16}$/.test(folderName) ? folderName : null);
+    const tags = Array.isArray(project.tags)
+      ? project.tags.filter((x) => typeof x === 'string' && x.trim()).map((x) => x.trim().slice(0, 24)).slice(0, 8)
+      : [];
+
+    candidates.push({
+      id: `${projEntry.dir || title}::${videoFile.size}`,
+      title,
+      workshopId: workshopId || null,
+      tags,
+      videoFile,
+      videoMime: sniffedMime,
+      previewFile,
+      previewUrl: previewFile ? URL.createObjectURL(previewFile) : null,
+      bytes: videoFile.size,
+      importedItemId: null,
+    });
+  }
+
+  return {
+    totalFolders: projectJsonDirs.length,
+    candidates,
+    skippedByType,
+    unsupportedContainers,
+  };
+}
+
 export function createSettingsController(store) {
   let rootContainer = null;
   let hostRef = null;
@@ -158,13 +299,43 @@ export function createSettingsController(store) {
   let dirty = false;
   let saving = false;
   let uploading = false;
+  let scanningWe = false;
+  let uploadProgress = null; // { label, percent, loaded, total }
+  let activeUploadId = null;
+  let weDiscovered = []; // Array of discovered local WE video candidates
+  let weSkippedNote = '';
   let errorMsg = null;
   let conflictServerConfig = null;
   let unsubContext = null;
   let unsubStore = null;
   let discardBtnRef = null;
   let dirtyPillRef = null;
+  let progressTextRef = null;
+  let progressBarRef = null;
   const thumbUrls = new Map();
+
+  function revokeWePreviewUrls() {
+    for (const c of weDiscovered) {
+      if (c.previewUrl) {
+        try { URL.revokeObjectURL(c.previewUrl); } catch { /* ignore */ }
+      }
+    }
+    weDiscovered = [];
+    weSkippedNote = '';
+  }
+
+  function updateProgressUi(loaded, total) {
+    const percent = total > 0 ? Math.min(100, Math.round((loaded / total) * 100)) : 0;
+    uploadProgress = { percent, loaded, total };
+    if (progressTextRef && progressBarRef) {
+      progressTextRef.textContent = t('uploadingProgress', {
+        percent,
+        loaded: formatBytes(loaded),
+        total: formatBytes(total),
+      });
+      progressBarRef.style.width = `${percent}%`;
+    }
+  }
 
   function markSliderDirty() {
     dirty = true;
@@ -253,6 +424,20 @@ export function createSettingsController(store) {
       }
       const item = store.findItem(slot.itemId);
       if (!item) return { ...base, mediaType: 'none' };
+      // ClaudeWeb public login appearance caps media at 50 MiB: for oversized 4K videos,
+      // gracefully publish the crisp video poster image to the login screen while keeping full video in workspace.
+      if (item.kind === 'video' && item.bytes > 48 * 1024 * 1024) {
+        if (item.posterFileName) {
+          const poster = await uploadPluginMedia(`/media/${item.id}/poster`, item.posterMime || 'image/jpeg');
+          return {
+            ...base,
+            mediaType: 'image',
+            mediaHash: poster.hash,
+            mediaMime: poster.mimeType,
+          };
+        }
+        return { ...base, mediaType: 'none' };
+      }
       const uploaded = await uploadPluginMedia(`/media/${item.id}`, item.mimeType);
       const out = {
         ...base,
@@ -336,64 +521,316 @@ export function createSettingsController(store) {
     }
   }
 
-  async function handleFileUpload(file) {
+  async function uploadBlobSmart(blob, options = {}) {
+    const mode = options.mode || 'media';
+    const fileName = options.fileName || blob.name || 'wallpaper';
+    const totalBytes = blob.size;
+    const CHUNK_THRESHOLD = 8 * 1024 * 1024;
+
+    if (mode !== 'we-zip' && totalBytes <= CHUNK_THRESHOLD) {
+      const params = new URLSearchParams();
+      if (fileName) params.set('name', fileName);
+      if (options.posterOf) params.set('posterOf', options.posterOf);
+      if (options.tone) params.set('tone', options.tone);
+      if (options.source) params.set('source', options.source);
+      if (options.workshopId) params.set('workshopId', options.workshopId);
+      if (Array.isArray(options.tags) && options.tags.length > 0) params.set('tags', options.tags.join(','));
+      const query = params.toString() ? `?${params.toString()}` : '';
+      const res = await hostRef.rpcRaw('POST', `/wallpapers/upload${query}`, {
+        headers: {
+          'Content-Type': options.contentType || blob.type || 'application/octet-stream',
+        },
+        body: blob,
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error || `Upload failed (${res.status})`);
+      return data;
+    }
+
+    // Chunked streaming upload (8 MiB slices) for large videos and Wallpaper Engine .zip packages.
+    const initRes = await hostRef.rpcRaw('POST', '/wallpapers/upload/init', {
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        mode,
+        fileName,
+        totalBytes,
+        contentType: options.contentType || blob.type || 'application/octet-stream',
+        posterOf: options.posterOf,
+        tone: options.tone,
+        source: options.source,
+        workshopId: options.workshopId,
+        tags: options.tags,
+      }),
+    });
+    const initData = await initRes.json();
+    if (!initRes.ok) {
+      throw new Error(initData?.error || `Upload init failed (${initRes.status})`);
+    }
+    const uploadId = initData.uploadId;
+    const chunkSize = Math.max(1024 * 1024, Number(initData.chunkSize) || CHUNK_THRESHOLD);
+    activeUploadId = uploadId;
+    updateProgressUi(0, totalBytes);
+    render();
+
+    try {
+      let offset = 0;
+      while (offset < totalBytes) {
+        if (!hostRef || hostRef.signal.aborted) {
+          throw new Error('Upload cancelled');
+        }
+        const slice = blob.slice(offset, Math.min(totalBytes, offset + chunkSize));
+        const chunkRes = await hostRef.rpcRaw('PUT', `/wallpapers/upload/${encodeURIComponent(uploadId)}/chunk?offset=${offset}`, {
+          headers: { 'Content-Type': 'application/octet-stream' },
+          body: slice,
+        });
+        if (!chunkRes.ok) {
+          let msg = `Chunk upload failed (${chunkRes.status})`;
+          try {
+            const errJson = await chunkRes.json();
+            if (errJson?.error) msg = errJson.error;
+          } catch { /* ignore */ }
+          throw new Error(msg);
+        }
+        offset += slice.size;
+        updateProgressUi(offset, totalBytes);
+      }
+
+      const completeRes = await hostRef.rpcRaw('POST', `/wallpapers/upload/${encodeURIComponent(uploadId)}/complete`, {
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tone: options.tone }),
+      });
+      const completeData = await completeRes.json();
+      if (!completeRes.ok) {
+        throw new Error(completeData?.error || `Finalize failed (${completeRes.status})`);
+      }
+      activeUploadId = null;
+      return completeData;
+    } catch (err) {
+      activeUploadId = null;
+      try {
+        await hostRef?.rpcRaw?.('DELETE', `/wallpapers/upload/${encodeURIComponent(uploadId)}`);
+      } catch { /* ignore cleanup failure */ }
+      throw err;
+    }
+  }
+
+  function applyUploadedItemToDraft(uploadedItem) {
+    if (!uploadedItem || !draft) return;
+    updateDraft((d) => {
+      if (d.scope === 'none') d.scope = 'workspace';
+      const slot = getActiveSlot(d);
+      if (slot) {
+        slot.mediaType = uploadedItem.kind === 'video' ? 'video' : 'image';
+        slot.itemId = uploadedItem.id;
+        slot.presetId = null;
+      }
+    });
+  }
+
+  async function handleWallpaperEngineZipUpload(file) {
     if (!file || !hostRef || uploading) return;
     uploading = true;
     errorMsg = null;
+    uploadProgress = { percent: 0, loaded: 0, total: file.size };
     render();
     try {
-      const detectedImageTone = file.type?.startsWith('image/')
-        ? await detectImageBlobTone(file)
-        : null;
-      const res = await hostRef.rpcRaw('POST', '/wallpapers/upload', {
-        headers: {
-          'Content-Type': file.type || 'application/octet-stream',
-          'X-File-Name': encodeURIComponent(file.name || 'wallpaper'),
-          ...(detectedImageTone ? { 'X-Media-Tone': detectedImageTone } : {}),
-        },
-        body: file,
+      const data = await uploadBlobSmart(file, {
+        mode: 'we-zip',
+        fileName: file.name || 'wallpaper.zip',
+        contentType: 'application/zip',
+        source: 'wallpaper-engine',
       });
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data?.error || `Upload failed (${res.status})`);
-      }
-      let uploadedItem = data.item;
-      if (uploadedItem?.kind === 'video') {
-        const posterBlob = await captureVideoPosterBlob(file);
-        if (posterBlob) {
-          const posterTone = await detectImageBlobTone(posterBlob);
-          const posterRes = await hostRef.rpcRaw('POST', `/wallpapers/upload?posterOf=${encodeURIComponent(uploadedItem.id)}`, {
-            headers: {
-              'Content-Type': posterBlob.type || 'image/jpeg',
-              ...(posterTone ? { 'X-Media-Tone': posterTone } : {}),
-            },
-            body: posterBlob,
-          });
-          if (posterRes.ok) {
-            const posterData = await posterRes.json();
-            if (posterData.item) uploadedItem = posterData.item;
-            if (posterData.items) store.setCatalog(posterData.items, posterData.stats);
-          }
-        }
-      }
       if (data.items) store.setCatalog(data.items, data.stats);
-
-      // Auto-select the freshly uploaded wallpaper into the active slot for immediate live preview!
-      if (uploadedItem && draft) {
-        updateDraft((d) => {
-          if (d.scope === 'none') d.scope = 'workspace';
-          const slot = getActiveSlot(d);
-          if (slot) {
-            slot.mediaType = uploadedItem.kind === 'video' ? 'video' : 'image';
-            slot.itemId = uploadedItem.id;
-            slot.presetId = null;
-          }
-        });
+      if (data.item) {
+        applyUploadedItemToDraft(data.item);
+        hostRef.ui?.notify?.(t('weImportedToast', { title: data.item.name }), 'success');
       }
     } catch (err) {
       errorMsg = err instanceof Error ? err.message : String(err);
     } finally {
       uploading = false;
+      uploadProgress = null;
+      render();
+    }
+  }
+
+  async function importWeVideoCandidate(candidate) {
+    if (!candidate || !hostRef || uploading) return;
+    uploading = true;
+    errorMsg = null;
+    uploadProgress = { percent: 0, loaded: 0, total: candidate.videoFile.size };
+    render();
+    try {
+      let posterBlob = candidate.previewFile || null;
+      if (!posterBlob) {
+        posterBlob = await captureVideoPosterBlob(candidate.videoFile);
+      }
+      const detectedTone = posterBlob ? await detectImageBlobTone(posterBlob) : null;
+
+      const data = await uploadBlobSmart(candidate.videoFile, {
+        mode: 'media',
+        fileName: candidate.title || candidate.videoFile.name,
+        contentType: candidate.videoMime || candidate.videoFile.type || 'video/mp4',
+        tone: detectedTone,
+        source: 'wallpaper-engine',
+        workshopId: candidate.workshopId,
+        tags: candidate.tags,
+      });
+
+      let uploadedItem = data.item;
+      if (data.items) store.setCatalog(data.items, data.stats);
+
+      if (uploadedItem?.kind === 'video' && posterBlob) {
+        try {
+          const posterData = await uploadBlobSmart(posterBlob, {
+            mode: 'poster',
+            fileName: posterBlob.name || 'preview.jpg',
+            contentType: posterBlob.type || 'image/jpeg',
+            posterOf: uploadedItem.id,
+            tone: detectedTone,
+          });
+          if (posterData.item) uploadedItem = posterData.item;
+          if (posterData.items) store.setCatalog(posterData.items, posterData.stats);
+        } catch { /* optional preview poster */ }
+      }
+
+      if (uploadedItem) {
+        candidate.importedItemId = uploadedItem.id;
+        applyUploadedItemToDraft(uploadedItem);
+        hostRef.ui?.notify?.(t('weImportedToast', { title: uploadedItem.name }), 'success');
+      }
+    } catch (err) {
+      errorMsg = err instanceof Error ? err.message : String(err);
+    } finally {
+      uploading = false;
+      uploadProgress = null;
+      render();
+    }
+  }
+
+  async function handleWallpaperEngineFolderSelect(fileList) {
+    if (!fileList || fileList.length === 0 || !hostRef || uploading || scanningWe) return;
+    scanningWe = true;
+    errorMsg = null;
+    revokeWePreviewUrls();
+    render();
+    try {
+      const scan = await scanWallpaperEngineFolderFiles(fileList);
+      scanningWe = false;
+
+      if (scan.candidates.length === 1 && scan.candidates[0].rejected === 'type') {
+        errorMsg = t('weUnsupportedTypeErr', {
+          title: scan.candidates[0].title,
+          type: scan.candidates[0].type,
+        });
+        render();
+        return;
+      }
+      if (scan.candidates.length === 1 && scan.candidates[0].rejected === 'container') {
+        errorMsg = t('weUnsupportedContainerErr', {
+          title: scan.candidates[0].title,
+          file: scan.candidates[0].file,
+        });
+        render();
+        return;
+      }
+
+      const valid = scan.candidates.filter((c) => !c.rejected);
+      const skippedParts = Object.entries(scan.skippedByType)
+        .map(([kind, count]) => `${count} ${kind}`);
+      if (scan.unsupportedContainers.length > 0) {
+        skippedParts.push(`${scan.unsupportedContainers.length} non-MP4/WebM`);
+      }
+      weSkippedNote = skippedParts.length > 0 ? t('weSkippedSummary', { details: skippedParts.join(', ') }) : '';
+
+      if (valid.length === 0) {
+        errorMsg = weSkippedNote || t('weNoVideosInFolder');
+        weSkippedNote = '';
+        render();
+        return;
+      }
+
+      // Single workshop folder containing one Video wallpaper -> import immediately!
+      if (scan.totalFolders === 1 && valid.length === 1) {
+        const single = valid[0];
+        try {
+          await importWeVideoCandidate(single);
+        } finally {
+          if (single.previewUrl) {
+            try { URL.revokeObjectURL(single.previewUrl); } catch { /* ignore */ }
+          }
+        }
+        return;
+      }
+
+      // Multiple workshop folders (e.g. Steam 431960 root) -> show local preview picker before uploading!
+      const existingByWorkshop = new Set(
+        (store.getState().items || []).map((it) => it.workshopId).filter(Boolean),
+      );
+      for (const c of valid) {
+        if (c.workshopId && existingByWorkshop.has(c.workshopId)) {
+          const match = store.getState().items.find((it) => it.workshopId === c.workshopId);
+          if (match) c.importedItemId = match.id;
+        }
+      }
+      weDiscovered = valid;
+      render();
+    } catch (err) {
+      scanningWe = false;
+      errorMsg = err instanceof Error ? err.message : String(err);
+      render();
+    }
+  }
+
+  async function handleFileUpload(file) {
+    if (!file || !hostRef || uploading) return;
+    if (String(file.name || '').toLowerCase().endsWith('.zip') || file.type === 'application/zip' || file.type === 'application/x-zip-compressed') {
+      await handleWallpaperEngineZipUpload(file);
+      return;
+    }
+    uploading = true;
+    errorMsg = null;
+    uploadProgress = file.size > 8 * 1024 * 1024 ? { percent: 0, loaded: 0, total: file.size } : null;
+    render();
+    try {
+      const detectedImageTone = file.type?.startsWith('image/')
+        ? await detectImageBlobTone(file)
+        : null;
+      const data = await uploadBlobSmart(file, {
+        mode: 'media',
+        fileName: file.name || 'wallpaper',
+        contentType: file.type || 'application/octet-stream',
+        tone: detectedImageTone,
+        source: 'local',
+      });
+      let uploadedItem = data.item;
+      if (data.items) store.setCatalog(data.items, data.stats);
+
+      if (uploadedItem?.kind === 'video') {
+        const posterBlob = await captureVideoPosterBlob(file);
+        if (posterBlob) {
+          const posterTone = await detectImageBlobTone(posterBlob);
+          try {
+            const posterData = await uploadBlobSmart(posterBlob, {
+              mode: 'poster',
+              fileName: 'poster.jpg',
+              contentType: posterBlob.type || 'image/jpeg',
+              posterOf: uploadedItem.id,
+              tone: posterTone,
+            });
+            if (posterData.item) uploadedItem = posterData.item;
+            if (posterData.items) store.setCatalog(posterData.items, posterData.stats);
+          } catch { /* optional poster */ }
+        }
+      }
+
+      // Auto-select the freshly uploaded wallpaper into the active slot for immediate live preview!
+      applyUploadedItemToDraft(uploadedItem);
+    } catch (err) {
+      errorMsg = err instanceof Error ? err.message : String(err);
+    } finally {
+      uploading = false;
+      uploadProgress = null;
       render();
     }
   }
@@ -634,7 +1071,7 @@ export function createSettingsController(store) {
     dropZone.className = 'cwwp-drop';
     const fileInput = document.createElement('input');
     fileInput.type = 'file';
-    fileInput.accept = 'image/png,image/jpeg,image/webp,image/avif,image/gif,video/mp4,video/webm';
+    fileInput.accept = 'image/png,image/jpeg,image/webp,image/avif,image/gif,video/mp4,video/webm,.zip,application/zip';
     fileInput.style.display = 'none';
     fileInput.onchange = () => {
       const f = fileInput.files?.[0];
@@ -644,7 +1081,7 @@ export function createSettingsController(store) {
     const uploadBtn = document.createElement('button');
     uploadBtn.type = 'button';
     uploadBtn.className = 'cwwp-btn';
-    uploadBtn.disabled = uploading;
+    uploadBtn.disabled = uploading || scanningWe;
     uploadBtn.textContent = uploading ? t('uploading') : t('uploadBtn');
     uploadBtn.onclick = () => fileInput.click();
 
@@ -663,6 +1100,169 @@ export function createSettingsController(store) {
     };
     dropZone.append(fileInput, uploadBtn, uploadHint);
     uploadsSec.append(uploadsHead, dropZone);
+
+    // Chunked Upload Progress Bar
+    progressTextRef = null;
+    progressBarRef = null;
+    if (uploading && uploadProgress) {
+      const pWrap = document.createElement('div');
+      pWrap.className = 'cwwp-progress-wrap';
+      const pText = document.createElement('span');
+      pText.className = 'cwwp-progress-text';
+      pText.textContent = t('uploadingProgress', {
+        percent: uploadProgress.percent,
+        loaded: formatBytes(uploadProgress.loaded),
+        total: formatBytes(uploadProgress.total),
+      });
+      const pTrack = document.createElement('div');
+      pTrack.className = 'cwwp-progress-track';
+      const pBar = document.createElement('div');
+      pBar.className = 'cwwp-progress-bar';
+      pBar.style.width = `${uploadProgress.percent}%`;
+      pTrack.appendChild(pBar);
+      pWrap.append(pText, pTrack);
+      progressTextRef = pText;
+      progressBarRef = pBar;
+      uploadsSec.appendChild(pWrap);
+    }
+
+    // 4b. Wallpaper Engine (Video) Importer
+    const weCard = document.createElement('div');
+    weCard.className = 'cwwp-card';
+    const weHead = document.createElement('div');
+    weHead.className = 'cwwp-sec-head';
+    const weTitle = document.createElement('h3');
+    weTitle.className = 'cwwp-sec-title';
+    weTitle.textContent = t('weSectionTitle');
+    weHead.appendChild(weTitle);
+
+    if (weDiscovered.length > 0) {
+      const clearWeBtn = document.createElement('button');
+      clearWeBtn.type = 'button';
+      clearWeBtn.className = 'cwwp-btn';
+      clearWeBtn.style.padding = '2px 8px';
+      clearWeBtn.style.fontSize = '11px';
+      clearWeBtn.textContent = t('weClearList');
+      clearWeBtn.onclick = () => {
+        revokeWePreviewUrls();
+        render();
+      };
+      weHead.appendChild(clearWeBtn);
+    }
+
+    const weFolderInput = document.createElement('input');
+    weFolderInput.type = 'file';
+    weFolderInput.multiple = true;
+    weFolderInput.setAttribute('webkitdirectory', '');
+    weFolderInput.setAttribute('directory', '');
+    weFolderInput.style.display = 'none';
+    weFolderInput.onchange = () => {
+      const files = weFolderInput.files;
+      if (files && files.length > 0) {
+        void handleWallpaperEngineFolderSelect(files);
+      }
+      weFolderInput.value = '';
+    };
+
+    const weZipInput = document.createElement('input');
+    weZipInput.type = 'file';
+    weZipInput.accept = '.zip,application/zip,application/x-zip-compressed';
+    weZipInput.style.display = 'none';
+    weZipInput.onchange = () => {
+      const f = weZipInput.files?.[0];
+      weZipInput.value = '';
+      if (f) void handleWallpaperEngineZipUpload(f);
+    };
+
+    const weActions = document.createElement('div');
+    weActions.className = 'cwwp-we-actions';
+    const weFolderBtn = document.createElement('button');
+    weFolderBtn.type = 'button';
+    weFolderBtn.className = 'cwwp-btn';
+    weFolderBtn.disabled = uploading || scanningWe;
+    weFolderBtn.textContent = scanningWe ? t('weScanning') : t('weSelectFolder');
+    weFolderBtn.onclick = () => weFolderInput.click();
+
+    const weZipBtn = document.createElement('button');
+    weZipBtn.type = 'button';
+    weZipBtn.className = 'cwwp-btn';
+    weZipBtn.disabled = uploading || scanningWe;
+    weZipBtn.textContent = t('weImportZip');
+    weZipBtn.onclick = () => weZipInput.click();
+
+    weActions.append(weFolderInput, weZipInput, weFolderBtn, weZipBtn);
+    const weHint = document.createElement('p');
+    weHint.className = 'cwwp-hint';
+    weHint.textContent = t('weFolderHint');
+    weCard.append(weHead, weActions, weHint);
+
+    if (weDiscovered.length > 0) {
+      const foundLbl = document.createElement('span');
+      foundLbl.className = 'cwwp-hint';
+      foundLbl.style.fontWeight = '600';
+      foundLbl.textContent = t('weFoundCount', { count: weDiscovered.length });
+      weCard.appendChild(foundLbl);
+
+      const listEl = document.createElement('div');
+      listEl.className = 'cwwp-we-list';
+      for (const candidate of weDiscovered) {
+        const row = document.createElement('div');
+        row.className = 'cwwp-we-row';
+
+        const thumb = document.createElement('div');
+        thumb.className = 'cwwp-we-thumb';
+        if (candidate.previewUrl) {
+          const img = document.createElement('img');
+          img.src = candidate.previewUrl;
+          img.alt = candidate.title;
+          thumb.appendChild(img);
+        } else {
+          thumb.textContent = 'MP4';
+        }
+
+        const info = document.createElement('div');
+        info.className = 'cwwp-we-info';
+        const nameSpan = document.createElement('span');
+        nameSpan.className = 'cwwp-we-name';
+        nameSpan.title = candidate.title;
+        nameSpan.textContent = candidate.title;
+        const subSpan = document.createElement('span');
+        subSpan.className = 'cwwp-we-sub';
+        subSpan.textContent = candidate.workshopId
+          ? `${formatBytes(candidate.bytes)} · ID ${candidate.workshopId}`
+          : formatBytes(candidate.bytes);
+        info.append(nameSpan, subSpan);
+
+        const impBtn = document.createElement('button');
+        impBtn.type = 'button';
+        impBtn.className = candidate.importedItemId ? 'cwwp-btn' : 'cwwp-btn cwwp-btn-primary';
+        impBtn.style.padding = '4px 10px';
+        impBtn.disabled = uploading;
+        impBtn.textContent = candidate.importedItemId ? t('weImportedBtn') : t('weImportBtn');
+        impBtn.onclick = () => {
+          if (candidate.importedItemId) {
+            const existing = store.findItem(candidate.importedItemId);
+            if (existing) {
+              applyUploadedItemToDraft(existing);
+              return;
+            }
+          }
+          void importWeVideoCandidate(candidate);
+        };
+
+        row.append(thumb, info, impBtn);
+        listEl.appendChild(row);
+      }
+      weCard.appendChild(listEl);
+
+      if (weSkippedNote) {
+        const skipEl = document.createElement('p');
+        skipEl.className = 'cwwp-hint';
+        skipEl.textContent = weSkippedNote;
+        weCard.appendChild(skipEl);
+      }
+    }
+    uploadsSec.appendChild(weCard);
 
     if (state.items.length === 0) {
       const empty = document.createElement('p');
@@ -692,8 +1292,12 @@ export function createSettingsController(store) {
         });
 
         const badge = document.createElement('span');
-        badge.className = 'cwwp-badge';
-        badge.textContent = item.kind === 'video' ? t('videoBadge') : t('imageBadge');
+        badge.className = item.source === 'wallpaper-engine' ? 'cwwp-badge cwwp-badge-we' : 'cwwp-badge';
+        badge.textContent = item.source === 'wallpaper-engine'
+          ? t('weBadge')
+          : item.kind === 'video'
+            ? t('videoBadge')
+            : t('imageBadge');
         thumbBtn.appendChild(badge);
 
         void ensureThumbUrl(item).then((url) => {
@@ -716,7 +1320,9 @@ export function createSettingsController(store) {
         meta.className = 'cwwp-item-meta';
         const nameEl = document.createElement('span');
         nameEl.className = 'cwwp-item-name';
-        nameEl.title = `${item.name} (${formatBytes(item.bytes)})`;
+        nameEl.title = item.workshopId
+          ? `${item.name} (${formatBytes(item.bytes)} · Workshop ${item.workshopId})`
+          : `${item.name} (${formatBytes(item.bytes)})`;
         nameEl.textContent = item.name;
         const delBtn = document.createElement('button');
         delBtn.type = 'button';
@@ -1145,6 +1751,15 @@ export function createSettingsController(store) {
       dirty = false;
       hostRef?.ui?.setPanelDirty?.(false);
       hostRef?.style?.remove('cw-wallpaper-ui');
+      if (activeUploadId) {
+        const abortId = activeUploadId;
+        activeUploadId = null;
+        void hostRef?.rpcRaw?.('DELETE', `/wallpapers/upload/${encodeURIComponent(abortId)}`).catch(() => {});
+      }
+      revokeWePreviewUrls();
+      uploadProgress = null;
+      uploading = false;
+      scanningWe = false;
       thumbUrls.clear();
       if (container) container.replaceChildren();
       rootContainer = null;

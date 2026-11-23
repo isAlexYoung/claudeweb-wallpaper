@@ -38,6 +38,7 @@ fs.writeFileSync(clientDistPath, clientBundle, 'utf8');
 
 // 2. Build single-file Node CJS backend bundle (dist/server.cjs)
 const presetsJson = readLf('src/shared/presets.json').trim();
+const weZipSrc = readLf('src/server/we-zip.cjs');
 const storageSrc = readLf('src/server/storage.cjs');
 const wsSrc = readLf('src/server/ws.cjs');
 const indexSrc = readLf('src/server/index.cjs');
@@ -48,6 +49,9 @@ const serverBundle = `'use strict';
 const __modules = {
   '../shared/presets.json': (module) => {
     module.exports = ${presetsJson};
+  },
+  './we-zip.cjs': (module, exports, require) => {
+${weZipSrc}
   },
   './storage.cjs': (module, exports, require) => {
 ${storageSrc}

@@ -67,15 +67,16 @@
   ],
   "wallpaperEngine": {
     "adapterVersion": 1,
-    "status": "planned-phase-3",
+    "status": "video-supported",
+    "maxPackageBytes": 268435456,
     "supportedTypes": [
-      "video (MP4/WebM with project.json + preview poster)",
-      "web (best-effort pure static HTML/CSS/JS inside sandboxed iframe with no external network requests)"
+      "video (MP4/WebM with project.json + optional preview poster — import a single workshop folder, the entire Steam 431960 folder, or a .zip package, up to 256 MB)"
     ],
     "unsupportedTypes": [
       "scene (.pkg proprietary DirectX/OpenGL shader scenes)",
+      "web (HTML/JS/WebGL packages — not enabled in video-only mode)",
       "application (native executables)",
-      "Wallpaper Engine proprietary JS APIs (window.wallpaperRegisterAudioListener, window.wallpaperPropertyListener custom bindings, iCUE/Chroma LED sync)"
+      "non-browser video containers (.mkv, .avi, .wmv)"
     ]
   }
 }
